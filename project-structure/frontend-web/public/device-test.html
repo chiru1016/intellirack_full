@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>IntelliRack Device Test</title>
+		<style>
+			body {
+				font-family: Arial, sans-serif;
+				max-width: 800px;
+				margin: 0 auto;
+				padding: 20px;
+				background: #1a1a1a;
+				color: white;
+			}
+			.test-section {
+				background: #2a2a2a;
+				padding: 20px;
+				margin: 20px 0;
+				border-radius: 10px;
+			}
+			button {
+				background: #4f46e5;
+				color: white;
+				border: none;
+				padding: 10px 20px;
+				border-radius: 5px;
+				cursor: pointer;
+				margin: 5px;
+			}
+			button:hover {
+				background: #4338ca;
+			}
+			.result {
+				background: #1f1f1f;
+				padding: 10px;
+				border-radius: 5px;
+				margin: 10px 0;
+				white-space: pre-wrap;
+			}
+			.success {
+				border-left: 4px solid #10b981;
+			}
+			.error {
+				border-left: 4px solid #ef4444;
+			}
+			input {
+				background: #3a3a3a;
+				color: white;
+				border: 1px solid #555;
+				padding: 8px;
+				border-radius: 5px;
+				margin: 5px;
+			}
+		</style>
+	</head>
+	<body>
+		<h1>IntelliRack Device Test</h1>
+
+		<div class="test-section">
+			<h2>Manual Device Test</h2>
+			<input
+				type="text"
+				id="deviceIP"
+				placeholder="Device IP (e.g., 192.168.0.105)"
+				value="192.168.0.105"
+			/>
+			<button onclick="testDevice()">Test Device</button>
+			<div id="manualResult" class="result"></div>
+		</div>
+
+		<div class="test-section">
+			<h2>Network Scan</h2>
+			<button onclick="scanNetwork()">Scan Common IPs</button>
+			<div id="scanResult" class="result"></div>
+		</div>
+
+		<div class="test-section">
+			<h2>mDNS Test</h2>
+			<button onclick="testMDNS()">Test mDNS Discovery</button>
+			<div id="mdnsResult" class="result"></div>
+		</div>
+
+		<script>
+			async function testDevice() {
+				const ip = document.getElementById("deviceIP").value;
+				const resultDiv = document.getElementById("manualResult");
+
+				if (!ip) {
+					resultDiv.innerHTML = "Please enter an IP address";
+					resultDiv.className = "result error";
+					return;
+				}
+
+				resultDiv.innerHTML = "Testing...";
+				resultDiv.className = "result";
+
+				try {
+					const response = await fetch(`http://${ip}/api/discovery`, {
+						mode: "cors",
+						signal: AbortSignal.timeout(5000),
+					});
+
+					if (response.ok) {
+						const data = await response.json();
+						resultDiv.innerHTML = `✅ Success!\n\nDevice Found:\n${JSON.stringify(
+							data,
+							null,
+							2
+						)}`;
+						resultDiv.className = "result success";
+					} else {
+						resultDiv.innerHTML = `❌ HTTP Error: ${response.status} ${response.statusText}`;
+						resultDiv.className = "result error";
+					}
+				} catch (error) {
+					resultDiv.innerHTML = `❌ Connection Error: ${error.message}`;
+					resultDiv.className = "result error";
+				}
+			}
+
+			async function scanNetwork() {
+				const resultDiv = document.getElementById("scanResult");
+				resultDiv.innerHTML = "Scanning...";
+				resultDiv.className = "result";
+
+				const commonIPs = [
+					"192.168.1.100",
+					"192.168.1.101",
+					"192.168.1.102",
+					"192.168.0.100",
+					"192.168.0.101",
+					"192.168.0.102",
+					"192.168.0.105",
+					"10.0.0.100",
+					"10.0.0.101",
+					"10.0.0.102",
+				];
+
+				const results = [];
+
+				for (const ip of commonIPs) {
+					try {
+						console.log(`Testing ${ip}...`);
+						const response = await fetch(`http://${ip}/api/discovery`, {
+							mode: "cors",
+							signal: AbortSignal.timeout(3000),
+						});
+
+						if (response.ok) {
+							const data = await response.json();
+							results.push(`✅ ${ip}: ${data.name || data.deviceId}`);
+						} else {
+							results.push(`❌ ${ip}: HTTP ${response.status}`);
+						}
+					} catch (error) {
+						results.push(`❌ ${ip}: ${error.message}`);
+					}
+				}
+
+				resultDiv.innerHTML = results.join("\n");
+				resultDiv.className = "result";
+			}
+
+			async function testMDNS() {
+				const resultDiv = document.getElementById("mdnsResult");
+				resultDiv.innerHTML = "Testing mDNS...";
+				resultDiv.className = "result";
+
+				const deviceNames = [
+					"intellirack_rack_001",
+					"intellirack_rack_002",
+					"intellirack.local",
+				];
+
+				const results = [];
+
+				for (const deviceName of deviceNames) {
+					try {
+						const response = await fetch(`http://${deviceName}/api/discovery`, {
+							mode: "cors",
+							signal: AbortSignal.timeout(3000),
+						});
+
+						if (response.ok) {
+							const data = await response.json();
+							results.push(`✅ ${deviceName}: ${data.name || data.deviceId}`);
+						} else {
+							results.push(`❌ ${deviceName}: HTTP ${response.status}`);
+						}
+					} catch (error) {
+						results.push(`❌ ${deviceName}: ${error.message}`);
+					}
+				}
+
+				resultDiv.innerHTML = results.join("\n");
+				resultDiv.className = "result";
+			}
+		</script>
+	</body>
+</html>
