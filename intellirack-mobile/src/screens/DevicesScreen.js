@@ -43,6 +43,16 @@ export default function DevicesScreen() {
 		load();
 	}, []);
 
+	// Auto-refresh weight data every 5 seconds
+	useEffect(() => {
+		const interval = setInterval(() => {
+			console.log("DevicesScreen - Auto-refreshing device data for weight updates...");
+			load();
+		}, 5000); // Refresh every 5 seconds
+
+		return () => clearInterval(interval);
+	}, []);
+
 	useEffect(() => {
 		if (!socket) return;
 

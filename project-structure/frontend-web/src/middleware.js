@@ -10,6 +10,7 @@ export function middleware(request) {
 		"/register",
 		"/",
 		"/dashboard",
+		"/warehouse",
 		"/privacy",
 		"/delete",
 	];

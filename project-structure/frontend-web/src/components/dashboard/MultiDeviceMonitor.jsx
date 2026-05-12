@@ -404,6 +404,20 @@ const MultiDeviceMonitor = ({ devices = [], socket }) => {
 									>
 										Restart
 									</button>
+									<button
+										onClick={() => sendTestCommand(device.rackId, "led_on")}
+										className="px-2 py-1 bg-yellow-500 hover:bg-yellow-600 text-white text-xs rounded"
+										disabled={!socket || !state.isOnline}
+									>
+										LED On
+									</button>
+									<button
+										onClick={() => sendTestCommand(device.rackId, "led_off")}
+										className="px-2 py-1 bg-gray-500 hover:bg-gray-600 text-white text-xs rounded"
+										disabled={!socket || !state.isOnline}
+									>
+										LED Off
+									</button>
 								</div>
 							</div>
 						</div>

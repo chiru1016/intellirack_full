@@ -14,10 +14,27 @@ import { fetchMyDevices } from "../services/devices";
 import { fetchActiveAlerts } from "../services/alerts";
 import { fetchRecentLogs } from "../services/logs";
 import { fetchIngredientsSummary } from "../services/ingredients";
+import {
+	fetchWarehouseBilling,
+	fetchWarehouseOverview,
+} from "../services/warehouse";
+import { getToken } from "../lib/auth";
+import { API_BASE } from "../config";
 import { useSocket } from "../contexts/SocketContext";
 import { useShoppingList } from "../contexts/ShoppingListContext";
 import AddToShoppingListModal from "../components/AddToShoppingListModal";
 import ExportShoppingListModal from "../components/ExportShoppingListModal";
+import * as FileSystem from "expo-file-system";
+import * as Sharing from "expo-sharing";
+import { Alert as RNAlert, Platform } from "react-native";
+
+function formatMoney(amount, currency = "USD") {
+	if (amount === null || amount === undefined) return `${currency} 0.00`;
+	return new Intl.NumberFormat(undefined, {
+		style: "currency",
+		currency,
+	}).format(Number(amount) || 0);
+}
 
 export default function DashboardScreen() {
 	const [counts, setCounts] = useState({
@@ -31,6 +48,8 @@ export default function DashboardScreen() {
 	const [alerts, setAlerts] = useState([]);
 	const [logs, setLogs] = useState([]);
 	const [ingredients, setIngredients] = useState([]);
+	const [warehouseOverview, setWarehouseOverview] = useState(null);
+	const [billingRecords, setBillingRecords] = useState([]);
 	const [loading, setLoading] = useState(false);
 	const [shoppingListModalVisible, setShoppingListModalVisible] =
 		useState(false);
@@ -42,12 +61,27 @@ export default function DashboardScreen() {
 	async function load() {
 		try {
 			setLoading(true);
-			const [devices, activeAlerts, recentLogs, ingredientsData] =
+			const [
+				devices,
+				activeAlerts,
+				recentLogs,
+				ingredientsData,
+				warehouseData,
+				billingData,
+			] =
 				await Promise.all([
 					fetchMyDevices(),
 					fetchActiveAlerts(5),
 					fetchRecentLogs(5),
 					fetchIngredientsSummary(),
+					fetchWarehouseOverview().catch((error) => {
+						console.warn("Warehouse overview unavailable:", error.message);
+						return null;
+					}),
+					fetchWarehouseBilling().catch((error) => {
+						console.warn("Warehouse billing unavailable:", error.message);
+						return [];
+					}),
 				]);
 
 			// Debug: Log device statuses to see what we're getting
@@ -74,6 +108,8 @@ export default function DashboardScreen() {
 			setLogs(recentLogs || []);
 			console.log("Dashboard load - ingredientsData:", ingredientsData);
 			setIngredients(ingredientsData || []);
+			setWarehouseOverview(warehouseData || null);
+			setBillingRecords(billingData || []);
 		} catch (e) {
 			console.error("Failed to load dashboard data:", e);
 		} finally {
@@ -81,8 +117,62 @@ export default function DashboardScreen() {
 		}
 	}
 
+	const openBillingRecord = async (billingRecord) => {
+		if (!billingRecord?._id) return;
+
+		try {
+			const token = await getToken();
+			if (!token) {
+				RNAlert.alert("Sign in required", "Please sign in again to view bills.");
+				return;
+			}
+
+			if (Platform.OS === "web") {
+				RNAlert.alert(
+					"View unavailable",
+					"Bill viewing is available on the mobile app."
+				);
+				return;
+			}
+
+			const fileName = `${billingRecord.invoiceNumber || billingRecord._id}.pdf`;
+			const fileUri = `${FileSystem.documentDirectory}${fileName}`;
+			const download = await FileSystem.downloadAsync(
+				`${API_BASE}/warehouse/billing/${billingRecord._id}/pdf`,
+				fileUri,
+				{
+					headers: {
+						Authorization: `Bearer ${token}`,
+					},
+				}
+			);
+
+			if (await Sharing.isAvailableAsync()) {
+				await Sharing.shareAsync(download.uri, {
+					mimeType: "application/pdf",
+					dialogTitle: `View ${billingRecord.invoiceNumber || "bill"}`,
+				});
+				return;
+			}
+
+			RNAlert.alert("PDF saved", `Saved to ${download.uri}`);
+		} catch (error) {
+			RNAlert.alert("Unable to view bill", error.message || "Failed to open PDF");
+		}
+	};
+
 	useEffect(() => {
 		load();
+	}, []);
+
+	// Auto-refresh weight data every 5 seconds
+	useEffect(() => {
+		const interval = setInterval(() => {
+			console.log("Auto-refreshing device data for weight updates...");
+			load();
+		}, 5000); // Refresh every 5 seconds
+
+		return () => clearInterval(interval);
 	}, []);
 
 	// Define unique handlers OUTSIDE useEffect - Fix for Hook rules
@@ -628,6 +718,71 @@ export default function DashboardScreen() {
 									: "All systems normal"}
 							</Text>
 						</View>
+
+						<View style={styles.statCardWide}>
+							<View style={styles.statCardHeader}>
+								<Ionicons name="business" size={28} color="#a855f7" />
+								<Text style={styles.statCardTitle}>Warehouse</Text>
+							</View>
+							<Text style={styles.statCardValueLarge}>
+								{warehouseOverview?.counts?.activeBills ?? 0}
+							</Text>
+							<Text style={styles.statCardSubtitle}>
+								Pending bills
+							</Text>
+						</View>
+					</View>
+				</View>
+
+				{/* Warehouse Summary */}
+				<View style={styles.sectionCard}>
+					<View style={styles.sectionHeader}>
+						<Text style={styles.sectionTitle}>Warehouse Summary</Text>
+						<View style={styles.warehouseBadge}>
+							<Ionicons name="business-outline" size={14} color="#8A2BE2" />
+							<Text style={styles.warehouseBadgeText}>Auto billing</Text>
+						</View>
+					</View>
+					<View style={styles.warehouseMetricGrid}>
+						<View style={styles.warehouseMetricCard}>
+							<Text style={styles.warehouseMetricValue}>
+								{warehouseOverview?.counts?.activeAlerts ?? 0}
+							</Text>
+							<Text style={styles.warehouseMetricLabel}>Low-stock alerts</Text>
+						</View>
+						<View style={styles.warehouseMetricCard}>
+							<Text style={styles.warehouseMetricValue}>
+								{warehouseOverview?.counts?.activeBills ?? 0}
+							</Text>
+							<Text style={styles.warehouseMetricLabel}>Pending bills</Text>
+						</View>
+						<View style={styles.warehouseMetricCard}>
+							<Text style={styles.warehouseMetricValue}>
+								{warehouseOverview?.counts?.thresholds ?? 0}
+							</Text>
+							<Text style={styles.warehouseMetricLabel}>Threshold rules</Text>
+						</View>
+					</View>
+
+					<View style={styles.warehouseFeed}>
+						{warehouseOverview?.stockStatus?.length > 0 ? (
+							warehouseOverview.stockStatus.slice(0, 3).map((item) => (
+								<View key={item._id} style={styles.warehouseFeedItem}>
+									<View style={styles.warehouseFeedDot} />
+									<View style={styles.warehouseFeedContent}>
+										<Text style={styles.warehouseFeedTitle}>
+											{item.ingredient || "Unknown ingredient"}
+										</Text>
+										<Text style={styles.warehouseFeedMeta}>
+											{item.device ? `${item.device.name} · ${item.device.rackId}` : "No device"} · Slot {item.slotId}
+										</Text>
+									</View>
+								<Text style={styles.warehouseFeedValue}>{item.weight ?? 0}g</Text>
+								</View>
+							))
+						) : (
+							<Text style={styles.emptyText}>No warehouse updates yet.</Text>
+						)}
 					</View>
 				</View>
 
@@ -961,6 +1116,50 @@ export default function DashboardScreen() {
 						contentContainerStyle={{ paddingBottom: 0 }}
 					/>
 				</View>
+
+				{/* Billing Records */}
+				<View style={styles.sectionCard}>
+					<View style={styles.sectionHeader}>
+						<Text style={styles.sectionTitle}>Billing Records</Text>
+						<View style={styles.warehouseBadge}>
+							<Ionicons name="document-text-outline" size={14} color="#8A2BE2" />
+							<Text style={styles.warehouseBadgeText}>
+								{billingRecords.length} bills
+							</Text>
+						</View>
+					</View>
+					{billingRecords.length > 0 ? (
+						billingRecords.slice(0, 5).map((record) => (
+							<View key={record._id} style={styles.restockItem}>
+								<View style={styles.restockItemIcon}>
+									<Ionicons name="receipt-outline" size={20} color="#8A2BE2" />
+								</View>
+								<View style={styles.restockItemContent}>
+									<Text style={styles.restockItemName}>
+										{record.ingredient || "Bill"} · {Number(record.quantity).toFixed(2)} kg
+									</Text>
+									<Text style={styles.restockItemStatus}>
+										{record.invoiceNumber || record._id} · {formatDate(record.issuedAt)}
+									</Text>
+									<Text style={styles.restockItemStatus}>
+										Total: {formatMoney(record.totalAmount, record.currency)}
+									</Text>
+								</View>
+								<View style={styles.restockItemActions}>
+									<TouchableOpacity
+										style={styles.addToShoppingListButton}
+										onPress={() => openBillingRecord(record)}
+									>
+										<Ionicons name="eye-outline" size={16} color="#8A2BE2" />
+										<Text style={styles.addToShoppingListText}>View</Text>
+									</TouchableOpacity>
+								</View>
+							</View>
+						))
+					) : (
+						<Text style={styles.emptyText}>No billing records yet.</Text>
+					)}
+				</View>
 			</ScrollView>
 
 			{/* Shopping List Modal */}
@@ -1194,6 +1393,85 @@ const styles = StyleSheet.create({
 		shadowRadius: 8,
 		shadowOffset: { width: 0, height: 2 },
 		elevation: 1,
+	},
+	warehouseBadge: {
+		flexDirection: "row",
+		alignItems: "center",
+		gap: 6,
+		paddingVertical: 6,
+		paddingHorizontal: 10,
+		borderRadius: 999,
+		backgroundColor: "#f3e8ff",
+	},
+	warehouseBadgeText: {
+		fontSize: 12,
+		fontWeight: "700",
+		color: "#7c3aed",
+	},
+	warehouseMetricGrid: {
+		flexDirection: "row",
+		gap: 10,
+		flexWrap: "wrap",
+		marginTop: 12,
+	},
+	warehouseMetricCard: {
+		flexGrow: 1,
+		minWidth: 96,
+		backgroundColor: "#faf5ff",
+		borderRadius: 14,
+		paddingVertical: 14,
+		paddingHorizontal: 12,
+		borderWidth: 1,
+		borderColor: "#e9d5ff",
+	},
+	warehouseMetricValue: {
+		fontSize: 24,
+		fontWeight: "900",
+		color: "#6d28d9",
+	},
+	warehouseMetricLabel: {
+		fontSize: 12,
+		color: "#6b7280",
+		marginTop: 4,
+	},
+	warehouseFeed: {
+		marginTop: 14,
+		gap: 10,
+	},
+	warehouseFeedItem: {
+		flexDirection: "row",
+		alignItems: "center",
+		paddingVertical: 10,
+		paddingHorizontal: 12,
+		backgroundColor: "#fafafa",
+		borderRadius: 12,
+		borderWidth: 1,
+		borderColor: "#f3f4f6",
+	},
+	warehouseFeedDot: {
+		width: 10,
+		height: 10,
+		borderRadius: 5,
+		backgroundColor: "#a855f7",
+		marginRight: 10,
+	},
+	warehouseFeedContent: {
+		flex: 1,
+	},
+	warehouseFeedTitle: {
+		fontSize: 14,
+		fontWeight: "700",
+		color: "#111827",
+	},
+	warehouseFeedMeta: {
+		fontSize: 12,
+		color: "#6b7280",
+		marginTop: 2,
+	},
+	warehouseFeedValue: {
+		fontSize: 13,
+		fontWeight: "800",
+		color: "#7c3aed",
 	},
 	restockItem: {
 		flexDirection: "row",

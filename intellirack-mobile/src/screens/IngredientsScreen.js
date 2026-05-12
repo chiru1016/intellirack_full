@@ -46,6 +46,16 @@ export default function IngredientsScreen() {
 		};
 	}, []);
 
+	// Auto-refresh ingredient weight data every 5 seconds
+	useEffect(() => {
+		const interval = setInterval(() => {
+			console.log("IngredientsScreen - Auto-refreshing ingredient data for weight updates...");
+			loadIngredients();
+		}, 5000); // Refresh every 5 seconds
+
+		return () => clearInterval(interval);
+	}, []);
+
 	// WebSocket real-time updates for ingredients
 	useEffect(() => {
 		if (!socket) return;

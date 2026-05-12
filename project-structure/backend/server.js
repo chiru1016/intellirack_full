@@ -44,6 +44,7 @@ app.use("/api/devices", require("./routes/devices"));
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/logs", require("./routes/logs"));
 app.use("/api/alerts", require("./routes/alerts"));
+app.use("/api/warehouse", require("./routes/warehouse"));
 app.use("/api/nfc", require("./routes/nfc"));
 app.use("/api/ingredients", require("./routes/ingredients"));
 app.use("/api/discovery", require("./routes/discovery"));
@@ -113,9 +114,10 @@ io.on("connection", (socket) => {
 	socket.on("sendCommand", async (data) => {
 		try {
 			const { deviceId, command, ...commandData } = data;
+			const normalizedRackId = normalizeRackId(deviceId);
 
 			console.log(
-				`Sending command to device ${deviceId}:`,
+				`Sending command to device ${deviceId} (normalized: ${normalizedRackId}):`,
 				command,
 				commandData
 			);
@@ -127,11 +129,11 @@ io.on("connection", (socket) => {
 
 			// For non-broadcast commands, verify device ownership
 			if (command !== "broadcast" && deviceId !== "broadcast") {
-				const device = await Device.findOne({ rackId: deviceId }).populate(
+				const device = await Device.findOne({ rackId: normalizedRackId }).populate(
 					"owner"
 				);
 				if (!device) {
-					throw new Error("Device not found");
+					throw new Error(`Device not found: ${normalizedRackId}`);
 				}
 				if (device.owner._id.toString() !== socket.userId.toString()) {
 					throw new Error("Not authorized to control this device");
@@ -156,8 +158,8 @@ io.on("connection", (socket) => {
 					...commandData,
 				});
 			} else {
-				// Device-specific command
-				topic = `intellirack/${deviceId}/command`;
+				// Device-specific command - use normalized rackId
+				topic = `intellirack/${normalizedRackId}/command`;
 				// Always send plain string for nfc_write or write
 				if (
 					(command === "nfc_write" || command === "write") &&
@@ -178,7 +180,7 @@ io.on("connection", (socket) => {
 					message = command;
 				} else {
 					// Send as JSON for other commands
-					message = JSON.stringify({ command, deviceId, ...commandData });
+					message = JSON.stringify({ command, deviceId: normalizedRackId, ...commandData });
 				}
 			}
 
@@ -192,13 +194,30 @@ io.on("connection", (socket) => {
 				)})`
 			);
 			console.log(
-				`Target deviceId: ${deviceId}, Command: ${command}, User: ${socket.userId}`
+				`Target deviceId: ${deviceId} (normalized: ${normalizedRackId}), Command: ${command}, User: ${socket.userId}`
 			);
 
-			mqttClient.publish(topic, message);
+			// Verify MQTT client exists before publishing
+			if (!mqttClient.connected) {
+				console.warn(`⚠️  MQTT client not connected! Status: ${mqttClient.connected}`);
+				throw new Error("MQTT broker not connected");
+			}
 
-			// Acknowledge command sent
-			socket.emit("commandSent", { deviceId, command, success: true });
+			mqttClient.publish(topic, message, { qos: 1, retain: false }, (publishErr) => {
+				if (publishErr) {
+					console.error(`❌ MQTT publish error for ${topic}:`, publishErr.message);
+					socket.emit("commandSent", {
+						deviceId: normalizedRackId,
+						command,
+						success: false,
+						error: `MQTT publish failed: ${publishErr.message}`,
+					});
+				} else {
+					console.log(`✅ MQTT message published successfully to ${topic}`);
+					// Acknowledge command sent
+					socket.emit("commandSent", { deviceId: normalizedRackId, command, success: true });
+				}
+			});
 		} catch (error) {
 			console.error("Command error:", error);
 			socket.emit("commandSent", {
@@ -479,15 +498,26 @@ app.post("/test-mqtt", (req, res) => {
 		console.log(`Test MQTT - Command: ${command}`);
 		console.log(`Test MQTT - CommandData:`, commandData);
 
-		mqttClient.publish(topic, message);
+		mqttClient.publish(topic, message, { qos: 1, retain: false }, (publishErr) => {
+			if (publishErr) {
+				console.error(`Test MQTT - Publish error for ${topic}:`, publishErr.message);
+				return res.status(500).json({
+					error: `MQTT publish failed: ${publishErr.message}`,
+					topic,
+					message,
+					command,
+				});
+			}
 
-		res.json({
-			success: true,
-			topic,
-			message,
-			command,
-			commandData,
-			timestamp: new Date().toISOString(),
+			console.log(`Test MQTT - ✅ Message published successfully`);
+			res.json({
+				success: true,
+				topic,
+				message,
+				command,
+				commandData,
+				timestamp: new Date().toISOString(),
+			});
 		});
 	} catch (error) {
 		res.status(500).json({ error: error.message });

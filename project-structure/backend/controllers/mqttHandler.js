@@ -3,6 +3,8 @@ const IngredientStatus = require("../models/IngredientStatus");
 const IngredientLog = require("../models/IngredientLog");
 const Alert = require("../models/Alert");
 const NFCTag = require("../models/NFCTag");
+const StockThreshold = require("../models/StockThreshold");
+const BillingRecord = require("../models/BillingRecord");
 const {
 	isSupabaseEnabled,
 	pushTelemetryBatch,
@@ -180,6 +182,169 @@ function normalizeDeviceId(deviceId) {
 function normalizeIpAddress(ipAddress) {
 	if (ipAddress === undefined || ipAddress === null) return "";
 	return String(ipAddress).trim();
+}
+
+function getOwnerId(device) {
+	if (!device || !device.owner) return null;
+	if (typeof device.owner === "object" && device.owner._id) {
+		return device.owner._id;
+	}
+	return device.owner;
+}
+
+async function getStockThresholdForEvent(device, ingredient, slotId) {
+	const ownerId = getOwnerId(device);
+	if (!ownerId) return null;
+
+	let threshold = await StockThreshold.findOne({
+		userId: ownerId,
+		device: device._id,
+		ingredient,
+		slotId,
+		isActive: true,
+	});
+
+	if (!threshold) {
+		threshold = await StockThreshold.findOne({
+			userId: ownerId,
+			device: null,
+			ingredient,
+			slotId,
+			isActive: true,
+		});
+	}
+
+	return threshold;
+}
+
+async function createWarehouseBillingIfNeeded(device, slotId, ingredient, weight, alert, io) {
+	try {
+		const ownerId = getOwnerId(device);
+		if (!ownerId) return null;
+		const AuditLog = require("../models/AuditLog");
+
+		const threshold = await getStockThresholdForEvent(device, ingredient, slotId);
+		const autoBillEnabled = threshold ? threshold.autoBillEnabled !== false : true;
+		if (!autoBillEnabled) return null;
+
+		const existingBill = await BillingRecord.findOne({
+			userId: ownerId,
+			device: device._id,
+			slotId,
+		ingredient,
+			status: "PENDING",
+		});
+
+		if (existingBill) return existingBill;
+
+		const quantity = Math.max(1, Number(threshold?.reorderQuantity) || 1);
+		const unitPrice = Number(threshold?.unitPrice) || 0;
+		const totalAmount = Number((quantity * unitPrice).toFixed(2));
+		const invoiceNumber = `INV-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+		const billingRecord = await BillingRecord.create({
+			userId: ownerId,
+			warehouse: threshold?.warehouse || undefined,
+			device: device._id,
+			alert: alert?._id,
+			invoiceNumber,
+			ingredient,
+			slotId,
+			quantity,
+			unitPrice,
+			totalAmount,
+			currency: threshold?.currency || "USD",
+			status: "PENDING",
+			threshold: Number(threshold?.lowThreshold) || Number(device.weightThresholds?.low) || 100,
+			triggeredWeight: typeof weight === "number" ? weight : 0,
+			notes: "Auto-generated from low-stock event",
+		});
+
+		await AuditLog.create({
+			user: ownerId,
+			action: "warehouse_bill_created",
+			details: {
+				invoiceNumber,
+				deviceId: device._id,
+				deviceRackId: device.rackId,
+				alertId: alert?._id,
+				ingredient,
+				slotId,
+				quantity,
+				totalAmount,
+			},
+			createdAt: new Date(),
+		});
+
+		io.to(`user:${ownerId}`).emit("warehouseBillCreated", {
+			billingId: billingRecord._id,
+			invoiceNumber,
+			deviceId: device.rackId,
+			ingredient,
+			slotId,
+			quantity,
+			unitPrice,
+			totalAmount,
+			currency: billingRecord.currency,
+			status: billingRecord.status,
+			createdAt: billingRecord.createdAt,
+		});
+
+		return billingRecord;
+	} catch (error) {
+		console.error("Error creating warehouse billing:", error);
+		return null;
+	}
+}
+
+async function cancelWarehouseBilling(device, slotId, ingredient, status, io) {
+	try {
+		const ownerId = getOwnerId(device);
+		if (!ownerId) return 0;
+		const AuditLog = require("../models/AuditLog");
+
+		const result = await BillingRecord.updateMany(
+			{
+				userId: ownerId,
+				device: device._id,
+				slotId,
+				ingredient,
+				status: "PENDING",
+			},
+			{
+				status: "CANCELLED",
+				cancelledAt: new Date(),
+				notes: `Auto-cancelled after stock recovered to ${status}`,
+			}
+		);
+
+		if ((result.modifiedCount || 0) > 0) {
+			await AuditLog.create({
+				user: ownerId,
+				action: "warehouse_bill_cancelled",
+				details: {
+					deviceId: device._id,
+					deviceRackId: device.rackId,
+					ingredient,
+					slotId,
+					status,
+				},
+				createdAt: new Date(),
+			});
+
+			io.to(`user:${ownerId}`).emit("warehouseStockRecovered", {
+				deviceId: device.rackId,
+				ingredient,
+				slotId,
+				status,
+			});
+		}
+
+		return result.modifiedCount || 0;
+	} catch (error) {
+		console.error("Error cancelling warehouse billing:", error);
+		return 0;
+	}
 }
 
 function parseBatchKey(batchKey) {
@@ -836,7 +1001,7 @@ async function handleMQTTMessage(payload, io) {
 			performanceMonitor.recordMQTTMessage(false);
 			return;
 		}
-
+	const slotId = rawSlotId || 1; // Default to slot 1 if not provided
 		console.log(`🔍 Processing MQTT message for device: ${deviceId}`);
 
 		// Find and update device
@@ -1364,7 +1529,7 @@ async function processIngredientDataBatch(
 		// Auto-resolve alerts when conditions improve
 		if (["GOOD", "MODERATE"].includes(status)) {
 			try {
-				await autoResolveAlerts(device, validSlotId, ingredient, status); // Use validSlotId for consistency
+				await autoResolveAlerts(device, validSlotId, ingredient, status, io); // Use validSlotId for consistency
 			} catch (resolveError) {
 				utils.logWithContext("error", "Error auto-resolving alerts", {
 					deviceId: device.rackId,
@@ -1557,6 +1722,7 @@ async function handleLowStockAlertBatch(
 ) {
 	try {
 		const alertType = status === "EMPTY" ? "EMPTY" : "LOW_STOCK";
+		let createdAlert = null;
 
 		// Check for ANY existing unacknowledged alert for this ingredient/device/slot
 		const existingAlert = await Alert.findOne({
@@ -1577,7 +1743,7 @@ async function handleLowStockAlertBatch(
 				});
 			}
 
-			const alert = await Alert.create({
+			createdAlert = await Alert.create({
 				userId: device.owner._id,
 				device: device._id,
 				ingredient: ingredient,
@@ -1589,7 +1755,7 @@ async function handleLowStockAlertBatch(
 
 			// Add to batch buffer
 			const key = utils.getBatchKey(device.rackId, slotId);
-			utils.addToBatchBuffer("alerts", key, alert);
+			utils.addToBatchBuffer("alerts", key, createdAlert);
 
 			utils.logWithContext("info", "Low stock alert created", {
 				alertType,
@@ -1605,7 +1771,17 @@ async function handleLowStockAlertBatch(
 				ingredient: ingredient,
 				status,
 			});
+
 		}
+
+			await createWarehouseBillingIfNeeded(
+				device,
+				slotId,
+				ingredient,
+				null,
+				createdAlert || existingAlert || null,
+				io
+			);
 	} catch (error) {
 		utils.logWithContext("error", "Error handling low stock alert batch", {
 			alertType: status,
@@ -1616,7 +1792,7 @@ async function handleLowStockAlertBatch(
 }
 
 // Auto-resolve alerts when conditions improve
-async function autoResolveAlerts(device, slotId, ingredient, status) {
+async function autoResolveAlerts(device, slotId, ingredient, status, io) {
 	try {
 		// Find and resolve any active alerts for this ingredient/device/slot
 		const resolvedAlerts = await Alert.updateMany(
@@ -1637,6 +1813,8 @@ async function autoResolveAlerts(device, slotId, ingredient, status) {
 		);
 
 		if (resolvedAlerts.modifiedCount > 0) {
+			await cancelWarehouseBilling(device, slotId, ingredient, status, io);
+
 			utils.logWithContext("info", "Auto-resolved alerts", {
 				deviceId: device.rackId,
 				slotId,
@@ -1714,7 +1892,7 @@ async function sendWebhook(
 		}
 	} catch (error) {
 		utils.logWithContext("error", "Webhook error", {
-			webhookUrl: user?.webhookUrl,
+			webhookUrl: undefined,
 			error: error.message,
 		});
 

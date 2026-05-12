@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useTheme } from "@/contexts/ThemeContext";
 import { MoonStar, SunMedium } from "lucide-react";
 import { Button } from "@/components";
@@ -23,6 +24,13 @@ export default function DashboardNavbar({ user, onSignOut, tabs, currentTab, onT
 				<GlassTabs tabs={tabs} currentTab={currentTab} onTabChange={onTabChange} glassy />
 			</div>
 			<div className="flex items-center gap-3">
+				<Link
+					href="/warehouse"
+					className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 px-4 py-2.5 text-sm font-semibold text-slate-950 shadow-lg shadow-pink-500/15 transition-all hover:scale-[1.02]"
+				>
+					Warehouse
+				</Link>
+
 				{/* Theme Toggle Button */}
 				<button
 					type="button"

@@ -857,6 +857,36 @@ export default function DeviceActionSheet({
 					)}
 					<Text style={styles.actionButtonText}>Reset WiFi</Text>
 				</TouchableOpacity>
+				<TouchableOpacity
+					style={[
+						styles.actionButton,
+						loadingStates.led_on && styles.actionButtonLoading,
+					]}
+					onPress={() => send("led_on")}
+					disabled={loadingStates.led_on}
+				>
+					{loadingStates.led_on ? (
+						<ActivityIndicator size="small" color="#fbbf24" />
+					) : (
+						<Ionicons name="bulb" size={24} color="#fbbf24" />
+					)}
+					<Text style={styles.actionButtonText}>LED On</Text>
+				</TouchableOpacity>
+				<TouchableOpacity
+					style={[
+						styles.actionButton,
+						loadingStates.led_off && styles.actionButtonLoading,
+					]}
+					onPress={() => send("led_off")}
+					disabled={loadingStates.led_off}
+				>
+					{loadingStates.led_off ? (
+						<ActivityIndicator size="small" color="#6b7280" />
+					) : (
+						<Ionicons name="bulb" size={24} color="#6b7280" />
+					)}
+					<Text style={styles.actionButtonText}>LED Off</Text>
+				</TouchableOpacity>
 			</View>
 
 			{/* Device Info Section */}
