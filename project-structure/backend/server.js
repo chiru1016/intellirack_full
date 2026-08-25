@@ -25,19 +25,32 @@ const envOrigins = (process.env.CORS_ORIGINS || "")
 	.map((origin) => origin.trim())
 	.filter(Boolean);
 const allowedOrigins = [...defaultOrigins, ...envOrigins];
+const vercelOriginPattern = /^https:\/\/intellirack-full-[a-z0-9-]+\.vercel\.app$/;
+const corsOrigin = (origin, callback) => {
+	if (
+		!origin ||
+		allowedOrigins.includes(origin) ||
+		vercelOriginPattern.test(origin)
+	) {
+		callback(null, true);
+		return;
+	}
+
+	callback(new Error(`Origin not allowed by CORS: ${origin}`));
+};
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
 	cors: {
-		origin: allowedOrigins,
+		origin: corsOrigin,
 		credentials: true,
 		methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
 		allowedHeaders: ["Content-Type", "Authorization"],
 	},
 });
 const corsOptions = {
-	origin: allowedOrigins,
+	origin: corsOrigin,
 	credentials: true,
 	methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
 	allowedHeaders: ["Content-Type", "Authorization"],
