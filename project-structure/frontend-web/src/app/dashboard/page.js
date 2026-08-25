@@ -44,7 +44,7 @@ import { AreaChart, Area } from "recharts";
 import IngredientsTab from "@/components/dashboard/IngredientsTab";
 import DashboardOverview from "@/components/dashboard/DashboardOverview";
 import MultiDeviceMonitor from "@/components/dashboard/MultiDeviceMonitor";
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+const API_BASE = process.env.NEXT_API_URL;
 
 const TABS = [
 	"Dashboard",
