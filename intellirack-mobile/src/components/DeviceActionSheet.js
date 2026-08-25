@@ -54,6 +54,16 @@ export default function DeviceActionSheet({
 	});
 
 	const { sendCommand, socket } = useSocket();
+	const normalizedDeviceIds = [device?.rackId, device?._id]
+		.filter(Boolean)
+		.map((value) => String(value).trim().toLowerCase());
+	const matchesCurrentDevice = useCallback(
+		(deviceId) => {
+			if (!deviceId) return false;
+			return normalizedDeviceIds.includes(String(deviceId).trim().toLowerCase());
+		},
+		[normalizedDeviceIds]
+	);
 
 	useEffect(() => {
 		if (device) {
@@ -100,7 +110,7 @@ export default function DeviceActionSheet({
 			);
 
 			// Strict device ID matching
-			if (data.deviceId && data.deviceId === deviceIdentifier) {
+			if (matchesCurrentDevice(data.deviceId)) {
 				console.log(
 					`DeviceActionSheet [${deviceIdentifier}] - Processing command response:`,
 					data
@@ -175,7 +185,7 @@ export default function DeviceActionSheet({
 			console.log("DeviceActionSheet - Command sent confirmation:", data);
 
 			// Strict device ID matching
-			if (data.deviceId && data.deviceId === deviceIdentifier) {
+			if (matchesCurrentDevice(data.deviceId)) {
 				// Extract command from various possible fields
 				const command = data.command || data.type || "unknown";
 
@@ -195,7 +205,7 @@ export default function DeviceActionSheet({
 			console.log("DeviceActionSheet - NFC event received:", data);
 
 			// Strict device ID matching
-			if (data.deviceId && data.deviceId === deviceIdentifier) {
+			if (matchesCurrentDevice(data.deviceId)) {
 				// Extract event type from various possible fields
 				const eventType = data.type || data.command || "unknown";
 
@@ -218,7 +228,7 @@ export default function DeviceActionSheet({
 			console.log("Event device ID:", data.deviceId);
 
 			// Strict device ID matching
-			if (data.deviceId && data.deviceId === deviceIdentifier) {
+			if (matchesCurrentDevice(data.deviceId)) {
 				console.log(
 					`DeviceActionSheet [${deviceIdentifier}] - Device status received (MATCHED):`,
 					data

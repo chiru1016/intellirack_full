@@ -19,11 +19,15 @@ SUPABASE_CURRENT_STATE_TABLE=rack_current_state
 - Current twin state is keyed by (rack_id, slot_id).
 - Use get_rack_twin_state(rack_id) or query rack_twin_current view.
 
-5) Retention behavior implemented:
+5) Security notes:
+- `rack_current_state` is intended for direct twin reads and does not rely on owner-based RLS.
+- `rack_telemetry_live` and `rack_telemetry_archive` can remain restricted for raw history access.
+
+6) Retention behavior implemented:
 - Older than 1 hour: moved from rack_telemetry_live to rack_telemetry_archive.
 - Older than 3 hours: deleted from rack_telemetry_archive.
 - Schedule: every 5 minutes via pg_cron.
 
-6) Notes:
+7) Notes:
 - Service role key should only be used on backend.
 - RLS policies allow users to read only their own rows (owner_id = auth.uid()).

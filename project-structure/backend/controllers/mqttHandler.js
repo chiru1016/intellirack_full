@@ -27,7 +27,7 @@ const CONFIG = {
 	BATCH_USAGE_THRESHOLD: 1000, // grams
 
 	// NEW: Data optimization settings
-	BATCH_WRITE_INTERVAL: 10000, // 10 seconds - batch database writes
+	BATCH_WRITE_INTERVAL: 5000, // 5 seconds - batch database writes
 	MIN_LOG_INTERVAL: 60 * 1000, // 1 minute - minimum time between logs
 	WEIGHT_CHANGE_THRESHOLD: 50, // 50g - only log significant changes
 	STATUS_CHANGE_THRESHOLD: 300 * 1000, // 5 minutes - status update frequency
@@ -169,6 +169,7 @@ const compressionCache = new Map(); // deviceId_slotId -> compressed data
 // NEW: Supabase streaming buffers for every MQTT snapshot
 const supabaseStreamBuffer = [];
 const supabaseCurrentStateBuffer = new Map(); // rackId_slotId -> latest snapshot
+let supabaseFlushTimer = null;
 
 function escapeRegex(value) {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -414,6 +415,22 @@ function enqueueSupabaseSnapshot({
 			isOnline,
 		},
 	});
+
+	if (!supabaseFlushTimer) {
+		supabaseFlushTimer = setTimeout(async () => {
+			supabaseFlushTimer = null;
+			try {
+				if (hasPendingSupabaseSnapshots()) {
+					await writeBatchToDatabase();
+				}
+			} catch (error) {
+				utils.logWithContext("error", "Deferred Supabase flush failed", {
+					error: error.message,
+					stack: error.stack,
+				});
+			}
+		}, 1000);
+	}
 }
 
 function hasPendingSupabaseSnapshots() {
@@ -423,33 +440,42 @@ function hasPendingSupabaseSnapshots() {
 async function findDeviceForMqtt({ deviceId, ipAddress, includeOwner = true }) {
 	const normalizedDeviceId = normalizeDeviceId(deviceId);
 	const normalizedIpAddress = normalizeIpAddress(ipAddress);
-	const queryParts = [];
 
-	if (normalizedDeviceId) {
-		queryParts.push({ rackId: normalizedDeviceId });
-		queryParts.push({
-			rackId: new RegExp(`^${escapeRegex(normalizedDeviceId)}$`, "i"),
-		});
+	const withOwner = (q) => (includeOwner ? q.populate("owner") : q);
+
+	if (normalizedDeviceId && normalizedIpAddress) {
+		// Priority 1: alias device — physicalId matches firmware rackId AND IP matches.
+		// Must run BEFORE rackId+IP to prevent a corrupted original device from intercepting
+		// heartbeats that belong to its alias.
+		const aliased = await withOwner(
+			Device.findOne({ physicalId: normalizedDeviceId, ipAddress: normalizedIpAddress })
+		);
+		if (aliased) return aliased;
+
+		// Priority 2: exact rackId + IP — the original device at its known IP
+		const exact = await withOwner(
+			Device.findOne({ rackId: normalizedDeviceId, ipAddress: normalizedIpAddress })
+		);
+		if (exact) return exact;
 	}
 
+	// Priority 3: IP-only match
 	if (normalizedIpAddress) {
-		queryParts.push({ ipAddress: normalizedIpAddress });
+		const byIp = await withOwner(Device.findOne({ ipAddress: normalizedIpAddress }));
+		if (byIp) return byIp;
 	}
 
-	if (queryParts.length === 0) return null;
-
-	let query;
-	if (queryParts.length === 1) {
-		query = Device.findOne(queryParts[0]);
-	} else {
-		query = Device.findOne({ $or: queryParts });
+	// Priority 4: rackId-only fallback (no IP in message, or IP mismatch / corrupted state)
+	if (normalizedDeviceId) {
+		const byId = await withOwner(
+			Device.findOne({
+				rackId: new RegExp(`^${escapeRegex(normalizedDeviceId)}$`, "i"),
+			})
+		);
+		if (byId) return byId;
 	}
 
-	if (includeOwner) {
-		query = query.populate("owner");
-	}
-
-	return query;
+	return null;
 }
 
 // NEW: Memory monitoring
@@ -604,8 +630,13 @@ const utils = {
 	},
 };
 
+// Guard flag to prevent concurrent batch writes
+let batchWriteInProgress = false;
+
 // NEW: Batch write function with enhanced monitoring
 async function writeBatchToDatabase() {
+	if (batchWriteInProgress) return;
+	batchWriteInProgress = true;
 	const timer = performanceMonitor.startTimer("batch_write");
 
 	try {
@@ -683,6 +714,7 @@ async function writeBatchToDatabase() {
 						.execute(async () => {
 							const startTime = Date.now();
 							try {
+								const slotId = status.slotId || 1;
 								await IngredientStatus.findOneAndUpdate(
 									{ device: status.deviceId, slotId },
 									{
@@ -884,6 +916,7 @@ async function writeBatchToDatabase() {
 			stack: error.stack,
 		});
 	} finally {
+		batchWriteInProgress = false;
 		timer.stop();
 	}
 }
@@ -985,7 +1018,7 @@ async function handleMQTTMessage(payload, io) {
 	const deviceId = normalizeDeviceId(rawDeviceId);
 
 	// Ensure slotId has a default value
-	const slotId = rawSlotId || 1;
+	const slotId = Number(rawSlotId) || 1;
 
 	try {
 		// Record MQTT message
@@ -1001,7 +1034,6 @@ async function handleMQTTMessage(payload, io) {
 			performanceMonitor.recordMQTTMessage(false);
 			return;
 		}
-	const slotId = rawSlotId || 1; // Default to slot 1 if not provided
 		console.log(`🔍 Processing MQTT message for device: ${deviceId}`);
 
 		// Find and update device
@@ -1015,6 +1047,22 @@ async function handleMQTTMessage(payload, io) {
 				deviceId,
 				ipAddress: payload.ipAddress,
 				payload,
+			});
+			enqueueSupabaseSnapshot({
+				rackId: deviceId,
+				slotId,
+				ownerId: payload.ownerId || null,
+				ingredient:
+					typeof ingredient === "string" && ingredient.trim() !== ""
+						? ingredient.trim()
+						: null,
+				tagUID: tagUID || null,
+				weight,
+				status: status || "UNKNOWN",
+				timestamp: new Date(),
+				mongoDeviceId: null,
+				ipAddress: payload.ipAddress,
+				isOnline: true,
 			});
 			performanceMonitor.recordMQTTMessage(false);
 			return;
@@ -1113,10 +1161,29 @@ async function handleMQTTMessage(payload, io) {
 		// Validate and normalize ingredient name
 		const finalIngredient = utils.normalizeIngredient(ingredient);
 		if (!finalIngredient) {
-			utils.logWithContext("warn", "Invalid ingredient name", {
+			utils.logWithContext("warn", "Invalid ingredient name — emitting weight without ingredient", {
 				deviceId,
 				ingredient,
 				payload,
+			});
+			// Still push weight update to frontend so the dashboard stays live
+			io.to(`user:${device.owner._id}`).emit("update", {
+				deviceId: device.rackId,
+				slotId,
+				ingredient: null,
+				weight,
+				status,
+				isOnline: true,
+				lastSeen: now,
+				ipAddress: payload.ipAddress,
+			});
+			io.to(`user:${device.owner._id}`).emit("deviceStatus", {
+				deviceId: device.rackId,
+				isOnline: true,
+				lastSeen: now,
+				weight,
+				status,
+				ingredient: null,
 			});
 			performanceMonitor.recordMQTTMessage(false);
 			return;
@@ -1177,7 +1244,7 @@ async function handleMQTTMessage(payload, io) {
 		}
 
 		// NEW: Check if we should log this data
-		const finalSlotId = slotId || 1; // Default to slot 1 if not provided
+		let finalSlotId = slotId || 1; // Default to slot 1 if not provided
 
 		// Ensure finalSlotId is valid
 		if (typeof finalSlotId !== "number" || finalSlotId < 1) {
@@ -1218,47 +1285,12 @@ async function handleMQTTMessage(payload, io) {
 			ingredient: finalIngredient,
 		};
 
-		utils.logWithContext("info", "Emitting websocket updates", {
-			deviceId,
-			updateData,
-			statusData,
-			owner: device.owner._id,
-			roomTarget: `user:${device.owner._id}`,
-		});
-
-		// Emit only to the device owner's room with consistent device ID
-		console.log(
-			`📡 Emitting update to room: user:${device.owner._id} for device: ${device.rackId} (topic deviceId: ${deviceId})`
-		);
-		console.log(
-			`🔍 Device DB info: _id=${device._id}, rackId=${device.rackId}`
-		);
-		console.log(`Update data:`, JSON.stringify(updateData, null, 2));
-
 		// Ensure we use the device.rackId for frontend consistency
 		const consistentUpdateData = { ...updateData, deviceId: device.rackId };
 		const consistentStatusData = { ...statusData, deviceId: device.rackId };
 
-		// Log detailed emit information for debugging
-		console.log(`📡 Emitting to room user:${device.owner._id}:`);
-		console.log(`   - Event: update, deviceId: ${device.rackId}`);
-		console.log(`   - Event: deviceStatus, deviceId: ${device.rackId}`);
-
-		// Get room socket count for debugging
-		io.in(`user:${device.owner._id}`)
-			.fetchSockets()
-			.then((sockets) => {
-				console.log(
-					`👥 Sockets in room user:${device.owner._id}: ${sockets.length}`
-				);
-				sockets.forEach((s) => console.log(`   - Socket: ${s.id}`));
-			});
-
 		io.to(`user:${device.owner._id}`).emit("update", consistentUpdateData);
-		io.to(`user:${device.owner._id}`).emit(
-			"deviceStatus",
-			consistentStatusData
-		);
+		io.to(`user:${device.owner._id}`).emit("deviceStatus", consistentStatusData);
 
 		if (
 			utils.shouldLogData(
@@ -2068,11 +2100,54 @@ async function handleDeviceHeartbeat(deviceId, payload, io) {
 		}
 
 		const now = new Date();
-		await Device.findByIdAndUpdate(device._id, {
-			isOnline: true,
-			lastSeen: now,
-			mqttConnected: true,
-		});
+		const normalizedIncomingIp = normalizeIpAddress(payload.ipAddress);
+		const heartbeatUpdate = { isOnline: true, lastSeen: now, mqttConnected: true };
+
+		if (!device.staticIp && normalizedIncomingIp) {
+			const ipChanged = device.ipAddress && device.ipAddress !== normalizedIncomingIp;
+
+			if (!ipChanged) {
+				// Same IP — normal heartbeat
+				heartbeatUpdate.ipAddress = normalizedIncomingIp;
+			} else {
+				// IP mismatch: check if an alias device has "claimed" the stored IP (corruption scenario)
+				const aliasOwnsStoredIp = await Device.findOne({
+					physicalId: device.rackId,
+					$or: [
+						{ ipAddress: device.ipAddress },
+						{ staticIp: device.ipAddress },
+					],
+				});
+
+				if (aliasOwnsStoredIp) {
+					// The original device's stored IP was overwritten by its alias before the fix.
+					// The incoming IP from this heartbeat is the real IP — restore it.
+					heartbeatUpdate.ipAddress = normalizedIncomingIp;
+					utils.logWithContext("info", "Auto-restoring corrupted IP on original device", {
+						deviceRackId: device.rackId,
+						corruptedIp: device.ipAddress,
+						restoredIp: normalizedIncomingIp,
+						aliasRackId: aliasOwnsStoredIp.rackId,
+					});
+				} else {
+					// Allow IP update only if device was offline long enough for a DHCP renewal
+					const wasOffline = device.lastSeen
+						? now.getTime() - new Date(device.lastSeen).getTime() > CONFIG.OFFLINE_THRESHOLD
+						: true;
+
+					if (wasOffline) {
+						heartbeatUpdate.ipAddress = normalizedIncomingIp;
+					} else {
+						utils.logWithContext("warn", "Heartbeat IP mismatch — skipping IP update (possible rackId conflict)", {
+							deviceRackId: device.rackId,
+							storedIp: device.ipAddress,
+							incomingIp: normalizedIncomingIp,
+						});
+					}
+				}
+			}
+		}
+		await Device.findByIdAndUpdate(device._id, heartbeatUpdate);
 
 		deviceStatus.set(device.rackId, {
 			lastHeartbeat: now.getTime(),
@@ -2279,7 +2354,15 @@ async function createOnlineAlert(device, io) {
 }
 
 // Start periodic status checking
+let _monitoringStarted = false;
+
 function startStatusMonitoring(io) {
+	if (_monitoringStarted) {
+		utils.logWithContext("info", "Status monitoring already running — skipping duplicate start");
+		return;
+	}
+	_monitoringStarted = true;
+
 	utils.logWithContext("info", "Starting device status monitoring", {
 		interval: CONFIG.STATUS_CHECK_INTERVAL,
 		offlineThreshold: CONFIG.OFFLINE_THRESHOLD,
@@ -2287,30 +2370,27 @@ function startStatusMonitoring(io) {
 
 	setInterval(() => checkDeviceStatus(io), CONFIG.STATUS_CHECK_INTERVAL);
 
-	// NEW: Start batch write scheduler
 	setInterval(async () => {
 		if (utils.shouldWriteBatch() || hasPendingSupabaseSnapshots()) {
 			await writeBatchToDatabase();
 		}
 	}, CONFIG.BATCH_WRITE_INTERVAL);
 
-	// NEW: Start data compression scheduler (daily at 2 AM)
 	setInterval(async () => {
 		const now = new Date();
 		if (now.getHours() === 2 && now.getMinutes() === 0) {
 			utils.logWithContext("info", "Starting scheduled data compression");
 			await compressOldData();
 		}
-	}, 60 * 1000); // Check every minute
+	}, 60 * 1000);
 
-	// NEW: Start cleanup scheduler (weekly on Sunday at 3 AM)
 	setInterval(async () => {
 		const now = new Date();
 		if (now.getDay() === 0 && now.getHours() === 3 && now.getMinutes() === 0) {
 			utils.logWithContext("info", "Starting scheduled cleanup tasks");
 			await performCleanupTasks();
 		}
-	}, 60 * 1000); // Check every minute
+	}, 60 * 1000);
 }
 
 // NEW: Cleanup tasks

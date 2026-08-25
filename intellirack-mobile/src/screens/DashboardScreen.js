@@ -36,6 +36,11 @@ function formatMoney(amount, currency = "USD") {
 	}).format(Number(amount) || 0);
 }
 
+function formatDate(value) {
+	if (!value) return "-";
+	return new Date(value).toLocaleString();
+}
+
 export default function DashboardScreen() {
 	const [counts, setCounts] = useState({
 		devices: 0,

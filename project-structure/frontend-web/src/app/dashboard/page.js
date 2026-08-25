@@ -112,6 +112,21 @@ export default function DashboardPage() {
 	const [lastIngredientsUpdate, setLastIngredientsUpdate] = useState(0);
 	const PREDICTIONS_CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
+	const normalizeId = (value) =>
+		value === undefined || value === null
+			? ""
+			: String(value).trim().toLowerCase();
+
+	const dedupeDevices = (list) => {
+		const seen = new Set();
+		return (Array.isArray(list) ? list : []).filter((device) => {
+			const key = normalizeId(device.rackId || device._id);
+			if (!key || seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
+	};
+
 	const fetchDevices = async () => {
 		try {
 			setDevicesLoading(true);
@@ -124,7 +139,7 @@ export default function DashboardPage() {
 			});
 			if (response.ok) {
 				const devicesData = await response.json();
-				setDevices(devicesData);
+				setDevices(dedupeDevices(devicesData));
 			}
 		} catch (error) {
 			console.error("Error fetching devices:", error);
@@ -132,6 +147,16 @@ export default function DashboardPage() {
 			setDevicesLoading(false);
 		}
 	};
+
+	useEffect(() => {
+		if (!user) return;
+
+		const intervalId = setInterval(() => {
+			fetchDevices();
+		}, 5000);
+
+		return () => clearInterval(intervalId);
+	}, [user]);
 
 	const fetchLogs = async () => {
 		try {
@@ -176,7 +201,7 @@ export default function DashboardPage() {
 			const devicesRes = await fetch(`${API_BASE}/devices/my`, { headers });
 			if (devicesRes.ok) {
 				const devicesData = await devicesRes.json();
-				setDevices(devicesData);
+				setDevices(dedupeDevices(devicesData));
 			}
 			setDevicesLoading(false);
 
@@ -268,10 +293,13 @@ export default function DashboardPage() {
 							const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
 
 							try {
+								const predictionParams = new URLSearchParams();
+								ingredientNames.forEach((name) => {
+									predictionParams.append("ingredients", name);
+								});
+
 								const batchPredRes = await fetch(
-									`${API_BASE}/ingredients/predictions/batch?ingredients=${JSON.stringify(
-										ingredientNames
-									)}`,
+									`${API_BASE}/ingredients/predictions/batch?${predictionParams.toString()}`,
 									{
 										headers,
 										signal: controller.signal,
@@ -656,9 +684,11 @@ export default function DashboardPage() {
 			// Also update devices state with real-time data
 			setDevices((prev) => {
 				const updated = prev.map((device) => {
+					const incomingId = normalizeId(data.deviceId);
+					const rackId = normalizeId(device.rackId);
+					const mongoId = normalizeId(device._id);
 					// Check both rackId and _id for device matching
-					const isTargetDevice =
-						device.rackId === data.deviceId || device._id === data.deviceId;
+					const isTargetDevice = incomingId === rackId || incomingId === mongoId;
 
 					if (isTargetDevice) {
 						console.log(
@@ -706,9 +736,11 @@ export default function DashboardPage() {
 
 			setDevices((prev) => {
 				const updated = prev.map((device) => {
+					const incomingId = normalizeId(data.deviceId);
+					const rackId = normalizeId(device.rackId);
+					const mongoId = normalizeId(device._id);
 					// Check both rackId and _id for device matching
-					const isTargetDevice =
-						device.rackId === data.deviceId || device._id === data.deviceId;
+					const isTargetDevice = incomingId === rackId || incomingId === mongoId;
 
 					if (isTargetDevice) {
 						console.log(

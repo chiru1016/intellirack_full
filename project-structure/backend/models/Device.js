@@ -10,6 +10,8 @@ const deviceSchema = new mongoose.Schema(
 			ref: "User",
 			required: true,
 		},
+		// For devices sharing the same firmware rackId (same chip), stores the original ID
+		physicalId: { type: String, default: null },
 		// Device status tracking
 		isOnline: { type: Boolean, default: false },
 		lastSeen: { type: Date, default: Date.now },
@@ -17,6 +19,7 @@ const deviceSchema = new mongoose.Schema(
 		lastStatus: { type: String, default: "UNKNOWN" },
 		firmwareVersion: { type: String, default: "v2.0" },
 		ipAddress: String,
+		staticIp: { type: String, default: null },
 		mqttConnected: { type: Boolean, default: false },
 		// Configuration
 		calibrationFactor: { type: Number, default: 204.99 },

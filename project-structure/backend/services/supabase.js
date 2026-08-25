@@ -51,8 +51,27 @@ async function upsertRackCurrentState(rows) {
 	return { skipped: false, count: rows.length };
 }
 
+async function fetchRackTwinCurrentState() {
+	if (!enabled) {
+		return [];
+	}
+
+	const { data, error } = await supabase
+		.from(CURRENT_STATE_TABLE)
+		.select("*")
+		.order("rack_id", { ascending: true })
+		.order("slot_id", { ascending: true });
+
+	if (error) {
+		throw new Error(`Supabase current-state fetch failed: ${error.message}`);
+	}
+
+	return data || [];
+}
+
 module.exports = {
 	isSupabaseEnabled,
 	pushTelemetryBatch,
 	upsertRackCurrentState,
+	fetchRackTwinCurrentState,
 };

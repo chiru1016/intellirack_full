@@ -1,10 +1,13 @@
 create extension if not exists pgcrypto;
 create extension if not exists pg_cron;
 
+-- Keep the public schema accessible for Supabase anon/authenticated reads where needed.
+grant usage on schema public to anon, authenticated;
+
 create table if not exists public.rack_telemetry_live (
   id uuid primary key default gen_random_uuid(),
   rack_id text not null,
-  slot_id integer not null,
+  slot_id integer not null check (slot_id between 1 and 9),
   owner_id text,
   ingredient text,
   tag_uid text,
@@ -13,13 +16,14 @@ create table if not exists public.rack_telemetry_live (
   event_time timestamptz not null,
   mongo_device_id text,
   metadata jsonb not null default '{}'::jsonb,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  constraint rack_telemetry_live_rack_slot_nonempty check (length(trim(rack_id)) > 0)
 );
 
 create table if not exists public.rack_telemetry_archive (
   id uuid primary key,
   rack_id text not null,
-  slot_id integer not null,
+  slot_id integer not null check (slot_id between 1 and 9),
   owner_id text,
   ingredient text,
   tag_uid text,
@@ -29,12 +33,13 @@ create table if not exists public.rack_telemetry_archive (
   mongo_device_id text,
   metadata jsonb not null default '{}'::jsonb,
   archived_at timestamptz not null default now(),
-  created_at timestamptz not null
+  created_at timestamptz not null,
+  constraint rack_telemetry_archive_rack_slot_nonempty check (length(trim(rack_id)) > 0)
 );
 
 create table if not exists public.rack_current_state (
   rack_id text not null,
-  slot_id integer not null,
+  slot_id integer not null check (slot_id between 1 and 9),
   owner_id text,
   ingredient text,
   tag_uid text,
@@ -44,7 +49,8 @@ create table if not exists public.rack_current_state (
   mongo_device_id text,
   metadata jsonb not null default '{}'::jsonb,
   updated_at timestamptz not null default now(),
-  primary key (rack_id, slot_id)
+  primary key (rack_id, slot_id),
+  constraint rack_current_state_rack_slot_nonempty check (length(trim(rack_id)) > 0)
 );
 
 create index if not exists idx_rtl_rack_slot_time
@@ -62,6 +68,9 @@ create index if not exists idx_rta_archived_at
 create index if not exists idx_rcs_owner
   on public.rack_current_state (owner_id, rack_id, slot_id);
 
+create index if not exists idx_rcs_rack_slot
+  on public.rack_current_state (rack_id, slot_id);
+
 create or replace function public.upsert_rack_current_state_updated_at()
 returns trigger
 language plpgsql
@@ -77,7 +86,9 @@ create trigger trg_rack_current_state_updated_at
 before update on public.rack_current_state
 for each row execute function public.upsert_rack_current_state_updated_at();
 
-create or replace view public.rack_twin_current as
+create or replace view public.rack_twin_current
+with (security_invoker = true)
+as
 select
   rack_id,
   slot_id,
@@ -108,6 +119,7 @@ returns table (
 )
 language sql
 security definer
+set search_path = public
 as $$
   select
     rcs.rack_id,
@@ -190,6 +202,16 @@ alter table public.rack_telemetry_live enable row level security;
 alter table public.rack_telemetry_archive enable row level security;
 alter table public.rack_current_state enable row level security;
 
+-- Direct twin reads are allowed against the current-state table/view.
+drop policy if exists rack_current_state_public_read on public.rack_current_state;
+create policy rack_current_state_public_read
+on public.rack_current_state
+for select
+using (true);
+
+drop policy if exists rack_twin_current_public_read on public.rack_current_state;
+
+-- History stays restricted to owner-backed reads; writes come from the service role.
 drop policy if exists rack_live_owner_read on public.rack_telemetry_live;
 create policy rack_live_owner_read
 on public.rack_telemetry_live
@@ -199,12 +221,6 @@ using (owner_id = auth.uid()::text);
 drop policy if exists rack_archive_owner_read on public.rack_telemetry_archive;
 create policy rack_archive_owner_read
 on public.rack_telemetry_archive
-for select
-using (owner_id = auth.uid()::text);
-
-drop policy if exists rack_state_owner_read on public.rack_current_state;
-create policy rack_state_owner_read
-on public.rack_current_state
 for select
 using (owner_id = auth.uid()::text);
 
@@ -226,3 +242,7 @@ on public.rack_current_state
 for update
 using (auth.role() = 'service_role')
 with check (auth.role() = 'service_role');
+
+grant select on public.rack_current_state to anon, authenticated;
+grant select on public.rack_twin_current to anon, authenticated;
+grant execute on function public.get_rack_twin_state(text) to anon, authenticated;

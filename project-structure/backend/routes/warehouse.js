@@ -147,57 +147,147 @@ router.get("/billing/:billingId/pdf", auth, async (req, res) => {
 		}
 
 		const invoiceNumber = record.invoiceNumber || `INV-${String(record._id).slice(-8).toUpperCase()}`;
-		const document = new PDFDocument({ size: "A4", margin: 48 });
+		const document = new PDFDocument({ size: "A4", margin: 0, info: { Title: invoiceNumber, Author: "IntelliRack" } });
 		res.setHeader("Content-Type", "application/pdf");
 		res.setHeader("Content-Disposition", `attachment; filename="${invoiceNumber}.pdf"`);
 		document.pipe(res);
 
-		document
-			.fillColor("#111827")
-			.fontSize(22)
-			.text("IntelliRack Warehouse Bill", { align: "left" });
+		const PAGE_W = 595;
+		const PAGE_H = 842;
+		const MARGIN = 48;
+		const CONTENT_W = PAGE_W - MARGIN * 2;
 
-		document
-			.moveDown(0.25)
-			.fontSize(11)
-			.fillColor("#6b7280")
-			.text("Warehouse billing statement generated from low-stock events");
+		// ── Header bar ────────────────────────────────────────────────────────────
+		document.rect(0, 0, PAGE_W, 90).fill("#0f172a");
+		document.fontSize(22).fillColor("#ffffff").font("Helvetica-Bold").text("IntelliRack", MARGIN, 24, { continued: true });
+		document.fontSize(22).fillColor("#38bdf8").font("Helvetica-Bold").text(" Warehouse");
+		document.fontSize(9).fillColor("#94a3b8").font("Helvetica").text("BILLING INVOICE", MARGIN, 56, { characterSpacing: 2 });
 
-		document.moveDown(1);
-		document.roundedRect(48, 120, 499, 88, 12).fillAndStroke("#f8fafc", "#e5e7eb");
-		document.fillColor("#111827").fontSize(10);
-		document.text(`Invoice: ${invoiceNumber}`, 64, 138);
-		document.text(`Issued: ${(record.issuedAt || record.generatedAt || new Date()).toLocaleString()}`, 64, 154);
-		document.text(`Status: ${record.status}`, 320, 138);
-		document.text(`Currency: ${record.currency || "USD"}`, 320, 154);
+		// Invoice number top-right
+		document.fontSize(9).fillColor("#94a3b8").font("Helvetica").text(invoiceNumber, 0, 30, { align: "right", width: PAGE_W - MARGIN });
 
-		document.moveDown(2.5);
-		document.fontSize(14).fillColor("#111827").text("Bill Details");
-		document.moveDown(0.5);
-		document.fontSize(11).fillColor("#374151");
-		document.text(`Ingredient: ${record.ingredient}`);
-		document.text(`Device: ${record.device?.name || record.device?.rackId || "Unknown device"}`);
-		document.text(`Slot: ${record.slotId}`);
-		document.text(`Quantity: ${Number(record.quantity).toFixed(2)} kg`);
-		document.text(`Unit price: ${formatMoney(record.unitPrice, record.currency)} / kg`);
-		document.text(`Total amount: ${formatMoney(record.totalAmount, record.currency)}`);
-		document.text(`Low-stock threshold: ${record.threshold}`);
-		document.text(`Triggered weight: ${record.triggeredWeight}g`);
+		// ── Status badge ──────────────────────────────────────────────────────────
+		const status = (record.status || "PENDING").toUpperCase();
+		const statusColors = { PAID: "#16a34a", CANCELLED: "#dc2626", PENDING: "#d97706", OVERDUE: "#9333ea" };
+		const badgeColor = statusColors[status] || "#475569";
+		const badgeX = PAGE_W - MARGIN - 80;
+		const badgeY = 56;
+		document.roundedRect(badgeX, badgeY, 80, 18, 4).fill(badgeColor);
+		document.fontSize(8).fillColor("#ffffff").font("Helvetica-Bold").text(status, badgeX, badgeY + 5, { width: 80, align: "center", characterSpacing: 1 });
 
+		// ── Meta cards row ────────────────────────────────────────────────────────
+		const cardY = 108;
+		const cardH = 72;
+		const cardW = (CONTENT_W - 12) / 2;
+
+		// Left card
+		document.roundedRect(MARGIN, cardY, cardW, cardH, 8).fillAndStroke("#f8fafc", "#e2e8f0");
+		document.fontSize(7).fillColor("#94a3b8").font("Helvetica-Bold").text("INVOICE NUMBER", MARGIN + 14, cardY + 12, { characterSpacing: 1 });
+		document.fontSize(11).fillColor("#0f172a").font("Helvetica-Bold").text(invoiceNumber, MARGIN + 14, cardY + 24);
+		document.fontSize(7).fillColor("#94a3b8").font("Helvetica-Bold").text("ISSUE DATE", MARGIN + 14, cardY + 44, { characterSpacing: 1 });
+		document.fontSize(9).fillColor("#374151").font("Helvetica").text(
+			(record.issuedAt || record.generatedAt || new Date()).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }),
+			MARGIN + 14, cardY + 55
+		);
+
+		// Right card
+		const card2X = MARGIN + cardW + 12;
+		document.roundedRect(card2X, cardY, cardW, cardH, 8).fillAndStroke("#f8fafc", "#e2e8f0");
+		document.fontSize(7).fillColor("#94a3b8").font("Helvetica-Bold").text("CURRENCY", card2X + 14, cardY + 12, { characterSpacing: 1 });
+		document.fontSize(11).fillColor("#0f172a").font("Helvetica-Bold").text(record.currency || "USD", card2X + 14, cardY + 24);
 		if (record.warehouse) {
-			document.moveDown(0.5);
-			document.text(`Warehouse: ${record.warehouse.name || "Warehouse"}`);
-			if (record.warehouse.location) document.text(`Location: ${record.warehouse.location}`);
-			if (record.warehouse.contactEmail) document.text(`Contact: ${record.warehouse.contactEmail}`);
+			document.fontSize(7).fillColor("#94a3b8").font("Helvetica-Bold").text("WAREHOUSE", card2X + 14, cardY + 44, { characterSpacing: 1 });
+			document.fontSize(9).fillColor("#374151").font("Helvetica").text(record.warehouse.name || "—", card2X + 14, cardY + 55);
+		}
+
+		// ── Section heading: Line Items ───────────────────────────────────────────
+		const tableTop = cardY + cardH + 28;
+		document.fontSize(11).fillColor("#0f172a").font("Helvetica-Bold").text("Line Items", MARGIN, tableTop);
+		document.moveTo(MARGIN, tableTop + 18).lineTo(MARGIN + CONTENT_W, tableTop + 18).lineWidth(1).strokeColor("#e2e8f0").stroke();
+
+		// Table header row
+		const thY = tableTop + 24;
+		document.rect(MARGIN, thY, CONTENT_W, 22).fill("#0f172a");
+		document.fontSize(8).fillColor("#ffffff").font("Helvetica-Bold");
+		const cols = [
+			{ label: "DESCRIPTION", x: MARGIN + 10, w: 180 },
+			{ label: "DEVICE / SLOT", x: MARGIN + 195, w: 120 },
+			{ label: "QTY (kg)", x: MARGIN + 320, w: 70, align: "right" },
+			{ label: "UNIT PRICE", x: MARGIN + 395, w: 70, align: "right" },
+			{ label: "AMOUNT", x: MARGIN + 468, w: CONTENT_W - 468 - 10, align: "right" },
+		];
+		cols.forEach(c => document.text(c.label, c.x, thY + 7, { width: c.w, align: c.align || "left", characterSpacing: 0.5 }));
+
+		// Single data row (alternating background)
+		const rowY = thY + 22;
+		document.rect(MARGIN, rowY, CONTENT_W, 28).fill("#f8fafc");
+		document.fontSize(9).fillColor("#111827").font("Helvetica");
+		const deviceLabel = record.device?.name || record.device?.rackId || "Unknown device";
+		document.text(record.ingredient || "—", cols[0].x, rowY + 9, { width: cols[0].w });
+		document.text(`${deviceLabel} / ${record.slotId}`, cols[1].x, rowY + 9, { width: cols[1].w });
+		document.text(Number(record.quantity).toFixed(2), cols[2].x, rowY + 9, { width: cols[2].w, align: "right" });
+		document.text(`${formatMoney(record.unitPrice, record.currency)}/kg`, cols[3].x, rowY + 9, { width: cols[3].w, align: "right" });
+		document.fillColor("#0f172a").font("Helvetica-Bold")
+			.text(formatMoney(record.totalAmount, record.currency), cols[4].x, rowY + 9, { width: cols[4].w, align: "right" });
+
+		// Bottom border of table
+		const tableBottom = rowY + 28;
+		document.moveTo(MARGIN, tableBottom).lineTo(MARGIN + CONTENT_W, tableBottom).lineWidth(1).strokeColor("#e2e8f0").stroke();
+
+		// ── Totals block ──────────────────────────────────────────────────────────
+		const totalsX = MARGIN + CONTENT_W - 210;
+		const totalsY = tableBottom + 16;
+		document.rect(totalsX, totalsY, 210, 56).fill("#0f172a");
+		document.fontSize(9).fillColor("#94a3b8").font("Helvetica").text("Subtotal", totalsX + 12, totalsY + 10, { width: 100 });
+		document.fontSize(9).fillColor("#ffffff").font("Helvetica").text(formatMoney(record.totalAmount, record.currency), totalsX + 12, totalsY + 10, { width: 186, align: "right" });
+		document.moveTo(totalsX + 12, totalsY + 28).lineTo(totalsX + 198, totalsY + 28).lineWidth(0.5).strokeColor("#334155").stroke();
+		document.fontSize(11).fillColor("#38bdf8").font("Helvetica-Bold").text("Total Due", totalsX + 12, totalsY + 34, { width: 100 });
+		document.fontSize(11).fillColor("#ffffff").font("Helvetica-Bold").text(formatMoney(record.totalAmount, record.currency), totalsX + 12, totalsY + 34, { width: 186, align: "right" });
+
+		// ── Stock trigger info ────────────────────────────────────────────────────
+		const infoY = totalsY + 80;
+		document.fontSize(10).fillColor("#0f172a").font("Helvetica-Bold").text("Stock Trigger Details", MARGIN, infoY);
+		document.moveTo(MARGIN, infoY + 14).lineTo(MARGIN + CONTENT_W, infoY + 14).lineWidth(0.5).strokeColor("#e2e8f0").stroke();
+
+		const pairs = [
+			["Low-stock threshold", `${record.threshold} g`],
+			["Triggered weight", `${record.triggeredWeight} g`],
+		];
+		pairs.forEach(([label, value], i) => {
+			const py = infoY + 22 + i * 18;
+			document.fontSize(9).fillColor("#6b7280").font("Helvetica").text(label, MARGIN, py);
+			document.fillColor("#111827").font("Helvetica").text(value, MARGIN + CONTENT_W - 160, py, { width: 160, align: "right" });
+		});
+
+		// Warehouse contact
+		if (record.warehouse?.location || record.warehouse?.contactEmail) {
+			const warehouseY = infoY + 22 + pairs.length * 18 + 12;
+			document.fontSize(10).fillColor("#0f172a").font("Helvetica-Bold").text("Warehouse Info", MARGIN, warehouseY);
+			document.moveTo(MARGIN, warehouseY + 14).lineTo(MARGIN + CONTENT_W, warehouseY + 14).lineWidth(0.5).strokeColor("#e2e8f0").stroke();
+			let wy = warehouseY + 22;
+			if (record.warehouse.location) {
+				document.fontSize(9).fillColor("#6b7280").font("Helvetica").text("Location", MARGIN, wy);
+				document.fillColor("#111827").text(record.warehouse.location, MARGIN + CONTENT_W - 200, wy, { width: 200, align: "right" });
+				wy += 18;
+			}
+			if (record.warehouse.contactEmail) {
+				document.fontSize(9).fillColor("#6b7280").font("Helvetica").text("Contact", MARGIN, wy);
+				document.fillColor("#0ea5e9").text(record.warehouse.contactEmail, MARGIN + CONTENT_W - 200, wy, { width: 200, align: "right" });
+			}
 		}
 
 		if (record.notes) {
-			document.moveDown(0.5);
-			document.text(`Notes: ${record.notes}`);
+			const notesY = document.y + 24;
+			document.rect(MARGIN, notesY, CONTENT_W, 1).fill("#e2e8f0");
+			document.fontSize(8).fillColor("#94a3b8").font("Helvetica-Bold").text("NOTES", MARGIN, notesY + 10, { characterSpacing: 1 });
+			document.fontSize(9).fillColor("#374151").font("Helvetica").text(record.notes, MARGIN, notesY + 22, { width: CONTENT_W });
 		}
 
-		document.moveDown(1.5);
-		document.fontSize(9).fillColor("#6b7280").text("This PDF was generated automatically from warehouse low-stock billing data.");
+		// ── Footer bar ────────────────────────────────────────────────────────────
+		document.rect(0, PAGE_H - 44, PAGE_W, 44).fill("#0f172a");
+		document.fontSize(8).fillColor("#64748b").font("Helvetica")
+			.text("This invoice was generated automatically by IntelliRack from low-stock billing data.", MARGIN, PAGE_H - 30, { width: CONTENT_W - 80 });
+		document.fillColor("#475569").text(`Page 1 of 1`, 0, PAGE_H - 30, { align: "right", width: PAGE_W - MARGIN });
 
 		document.end();
 	} catch (error) {

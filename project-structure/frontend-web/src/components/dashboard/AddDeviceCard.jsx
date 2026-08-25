@@ -40,111 +40,50 @@ const AddDeviceCard = ({ onClick, socket }) => {
 		setDiscoveredDevices([]);
 
 		try {
-			// Method 1: Use backend scan first to avoid browser LAN/CORS restrictions
+			// Use backend scan only to avoid browser LAN/CORS and mixed-content restrictions.
 			console.log("Starting backend-assisted discovery...");
-			const serverDevices = await scanViaServer();
-			console.log("Backend discovery devices found:", serverDevices);
-
-			// Method 1: Try mDNS discovery first
-			console.log("Starting mDNS discovery...");
-			const mDNSDevices = await scanMDNS();
-			console.log("mDNS devices found:", mDNSDevices);
-
-			// Method 2: Try HTTPS discovery first (for hosted environments)
-			console.log("Starting HTTPS discovery...");
-			const httpsDevices = await scanHTTPS();
-			console.log("HTTPS devices found:", httpsDevices);
-
-			// Method 3: Scan common local network ranges (HTTP fallback)
-			console.log("Starting network scan...");
-			const discovered = [...serverDevices, ...mDNSDevices, ...httpsDevices];
-			const networkRanges = ["192.168.1", "192.168.0", "10.0.0", "172.16.0"];
-
-			// Get current network info
-			const currentIP = await getCurrentIP();
-			if (currentIP) {
-				const baseIP = currentIP.split(".").slice(0, 3).join(".");
-				if (!networkRanges.includes(baseIP)) {
-					networkRanges.unshift(baseIP);
-				}
-			}
-
-			// Scan each network range
-			for (const baseIP of networkRanges) {
-				console.log(`Scanning network range: ${baseIP}.0/24`);
-				const devices = await scanNetworkRange(baseIP);
-				discovered.push(...devices);
-			}
+			const discovered = await scanViaServer();
+			console.log("Backend discovery devices found:", discovered);
 
 			// Remove duplicates based on deviceId
 			const uniqueDevices = discovered.filter(
 				(device, index, self) =>
-					index === self.findIndex((d) => d.deviceId === device.deviceId)
+					index ===
+					self.findIndex(
+						(d) =>
+							String(d.deviceId || "").toLowerCase() ===
+								String(device.deviceId || "").toLowerCase()
+					)
 			);
 
 			console.log("Total unique devices found:", uniqueDevices);
 
 			// If no devices found, show a helpful message and test device
 			if (uniqueDevices.length === 0) {
-				console.log("No devices found. This might be due to:");
-				console.log("1. Mixed content policy (HTTPS blocking HTTP)");
-				console.log("2. Devices not on the same network");
-				console.log("3. Devices not running the discovery endpoint");
-
-				// Show a test device for development/demo purposes
-				setDiscoveredDevices([
-					{
-						deviceId: "rack_001",
-						slotId: 1,
-						name: "IntelliRack rack_001 (Demo)",
-						type: "IntelliRack",
-						firmwareVersion: "v2.0",
-						ipAddress: "192.168.1.100",
-						macAddress: "AA:BB:CC:DD:EE:FF",
-						ssid: "TestNetwork",
-						rssi: -45,
-						mqttConnected: true,
-						currentWeight: 250.5,
-						currentStatus: "OK",
-						tagPresent: false,
-						currentIngredient: "",
-						discoveryTime: Date.now(),
-						isDemo: true,
-					},
-				]);
+				console.log("No devices found via backend scan.");
+				setDiscoveredDevices([]);
 			} else {
 				setDiscoveredDevices(uniqueDevices);
 			}
 		} catch (error) {
 			console.error("Discovery error:", error);
-			// Show a test device for development
-			setDiscoveredDevices([
-				{
-					deviceId: "rack_001",
-					slotId: 1,
-					name: "IntelliRack rack_001 (Demo)",
-					type: "IntelliRack",
-					firmwareVersion: "v2.0",
-					ipAddress: "192.168.1.100",
-					macAddress: "AA:BB:CC:DD:EE:FF",
-					ssid: "TestNetwork",
-					rssi: -45,
-					mqttConnected: true,
-					currentWeight: 250.5,
-					currentStatus: "OK",
-					tagPresent: false,
-					currentIngredient: "",
-					discoveryTime: Date.now(),
-					isDemo: true,
-				},
-			]);
+			setDiscoveredDevices([]);
 		} finally {
 			setIsDiscovering(false);
 		}
 	};
 
 	const scanViaServer = async () => {
-		const ranges = ["192.168.1", "192.168.0", "10.0.0", "172.16.0"];
+		const defaultRanges = ["192.168.1", "192.168.0", "10.0.0", "172.16.0"];
+		const host = typeof window !== "undefined" ? window.location.hostname : "";
+		const hostParts = host.split(".");
+		const derivedRange =
+			hostParts.length === 4 && hostParts.every((part) => /^\d+$/.test(part))
+				? `${hostParts[0]}.${hostParts[1]}.${hostParts[2]}`
+				: null;
+		const ranges = Array.from(
+			new Set([...(derivedRange ? [derivedRange] : []), ...defaultRanges])
+		);
 		const token = getToken();
 		const discovered = [];
 
@@ -160,15 +99,21 @@ const AddDeviceCard = ({ onClick, socket }) => {
 						ipRange,
 						startIp: 1,
 						endIp: 254,
-						timeout: 1500,
+						timeout: 1200,
 					}),
 				});
 
-				if (!response.ok) continue;
+				if (!response.ok) {
+					console.warn(`Backend scan failed for ${ipRange}: ${response.status}`);
+					continue;
+				}
 
 				const data = await response.json();
 				if (Array.isArray(data.devices)) {
 					discovered.push(...data.devices);
+					if (data.devices.length > 0) {
+						break;
+					}
 				}
 			} catch (error) {
 				console.log(`Backend scan failed for ${ipRange}:`, error.message);
@@ -657,11 +602,7 @@ const AddDeviceCard = ({ onClick, socket }) => {
 															<span className="px-2 py-1 bg-green-500/20 text-green-400 text-xs rounded-full">
 																{device.currentStatus}
 															</span>
-															{device.isDemo && (
-																<span className="px-2 py-1 bg-purple-500/20 text-purple-400 text-xs rounded-full">
-																	Demo
-																</span>
-															)}
+							
 														</div>
 														<div className="grid grid-cols-2 gap-2 text-sm">
 															<div>
@@ -721,16 +662,20 @@ const AddDeviceCard = ({ onClick, socket }) => {
 									</p>
 									<button
 										onClick={() => {
+											const uniqueId = "IR-" + Array.from(crypto.getRandomValues(new Uint8Array(4)))
+												.map((b) => b.toString(16).padStart(2, "0"))
+												.join("").toUpperCase();
 											setSelectedDevice({
-												deviceId: "manual_device",
+												deviceId: uniqueId,
 												slotId: 1,
-												name: "Manual Device",
+												name: "",
 												type: "IntelliRack",
 												firmwareVersion: "v2.0",
 												ipAddress: "",
 												macAddress: "",
 												isManual: true,
 											});
+											setRegistrationForm((prev) => ({ ...prev, rackId: uniqueId, name: "" }));
 										}}
 										className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
 									>

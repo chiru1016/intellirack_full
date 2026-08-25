@@ -5,9 +5,43 @@ const {
 	startStatusMonitoring,
 } = require("../controllers/mqttHandler");
 
+function normalizePem(pem) {
+	if (!pem || typeof pem !== "string") return undefined;
+	const trimmed = pem.trim();
+	const unquoted =
+		trimmed.startsWith('"') && trimmed.endsWith('"')
+			? trimmed.slice(1, -1)
+			: trimmed;
+	const normalized = unquoted.replace(/\\n/g, "\n");
+	return normalized || undefined;
+}
+
+function resolveMqttProtocol(mqttUrl) {
+	if (!mqttUrl) return { protocol: undefined, secure: false, websocket: false };
+
+	let parsedProtocol;
+	try {
+		parsedProtocol = new URL(mqttUrl).protocol.replace(":", "");
+	} catch (_) {
+		parsedProtocol = mqttUrl.split(":")[0];
+	}
+
+	const protocol = String(parsedProtocol || "").toLowerCase();
+	const secure = protocol === "mqtts" || protocol === "wss";
+	const websocket = protocol === "ws" || protocol === "wss";
+
+	return { protocol, secure, websocket };
+}
+
 function setupMQTT(io) {
-	// CA Certificate from environment variable or fallback
-	const MQTT_CA = process.env.MQTT_CA;
+	const mqttUrl = process.env.MQTT_URL;
+	if (!mqttUrl) {
+		throw new Error("Missing MQTT_URL. Set it in backend/.env before starting the server.");
+	}
+
+	const MQTT_CA = normalizePem(process.env.MQTT_CA);
+	const tlsInsecure = String(process.env.MQTT_TLS_INSECURE || "false").toLowerCase() === "true";
+	const { protocol, secure, websocket } = resolveMqttProtocol(mqttUrl);
 
 	const mqttOptions = {
 		clientId: `intellirack-server-${Date.now()}`,
@@ -15,6 +49,8 @@ function setupMQTT(io) {
 		reconnectPeriod: 5000,
 		connectTimeout: 30000,
 		keepalive: 60,
+		resubscribe: true,
+		reconnectOnConnackError: true,
 	};
 
 	// Add MQTT credentials from environment variables
@@ -25,68 +61,65 @@ function setupMQTT(io) {
 		mqttOptions.password = process.env.MQTT_PASSWORD;
 	}
 
-	// Use secure MQTT URL from environment or fallback
-	const mqttUrl = process.env.MQTT_URL;
+	if (protocol) {
+		mqttOptions.protocol = protocol;
+	}
 
-	// Detect if we're using secure or insecure MQTT
-	// Check both protocol prefix and port number
-	const isSecure = mqttUrl.startsWith("mqtts://");
-	// Only apply SSL options for secure connections
-	if (isSecure) {
-		mqttOptions.protocol = "mqtts";
-		mqttOptions.rejectUnauthorized = false;
-		mqttOptions.ca = MQTT_CA;
-		mqttOptions.secureProtocol = "TLSv1_2_method";
-		mqttOptions.checkServerIdentity = (hostname, cert) => {
-			return hostname === "mqtt.judesonleo.app"
-				? undefined
-				: new Error("Hostname mismatch");
-		};
-	} else {
-		// For insecure connections, remove SSL options
-		delete mqttOptions.protocol;
-		delete mqttOptions.rejectUnauthorized;
-		delete mqttOptions.ca;
-		delete mqttOptions.secureProtocol;
-		delete mqttOptions.checkServerIdentity;
+	if (secure) {
+		mqttOptions.rejectUnauthorized = !tlsInsecure;
+		if (MQTT_CA) {
+			mqttOptions.ca = MQTT_CA;
+		}
+		mqttOptions.servername = process.env.MQTT_TLS_SERVERNAME || undefined;
+	}
+
+	if (websocket && !mqttOptions.path) {
+		mqttOptions.path = process.env.MQTT_WS_PATH || "/mqtt";
 	}
 
 	console.log(`🔒 Connecting to MQTT broker: ${mqttUrl}`);
 	console.log(
-		`🔐 Protocol: ${isSecure ? "MQTTS (Secure)" : "MQTT (Insecure)"}`
+		`🔐 Protocol: ${secure ? `${protocol.toUpperCase()} (Secure)` : `${(protocol || "mqtt").toUpperCase()} (Insecure)`}`
 	);
-	if (isSecure) {
-		console.log(`🔐 Using CA certificate for: mqtt.judesonleo.app`);
+	if (secure) {
+		console.log(`🔐 TLS mode: ${tlsInsecure ? "insecure (verification disabled)" : "strict"}`);
 		console.log(
-			`📜 Certificate source: ${
-				process.env.MQTT_CA ? "Environment" : "Fallback"
-			}`
+			`📜 Certificate source: ${MQTT_CA ? "Environment" : "System trust store"}`
 		);
-		// console.log(MQTT_CA);
+		if (mqttOptions.servername) {
+			console.log(`🌐 TLS servername override: ${mqttOptions.servername}`);
+		}
+	}
+
+	if (websocket) {
+		console.log(`🌍 WebSocket path: ${mqttOptions.path}`);
 	}
 
 	const client = mqtt.connect(mqttUrl, mqttOptions);
 
 	client.on("connect", () => {
 		console.log("✅ MQTT connected to broker");
-		client.subscribe("intellirack/#");
-		client.subscribe("intellirack/+/heartbeat");
-		client.subscribe("intellirack/+/status");
-		client.subscribe("intellirack/+/response");
-		client.subscribe("intellirack/+/data");
-		// Subscribe to weight data topic (devices publish to base "intellirack/" topic)
-		client.subscribe("intellirack/");
+		const topics = [
+			"intellirack/#",
+			"intellirack/+/heartbeat",
+			"intellirack/+/status",
+			"intellirack/+/response",
+			"intellirack/+/data",
+			"intellirack/",
+		];
 
-		console.log("📡 Subscribed to MQTT topics:");
-		console.log("  - intellirack/#");
-		console.log("  - intellirack/+/heartbeat");
-		console.log("  - intellirack/+/status");
-		console.log("  - intellirack/+/response");
-		console.log("  - intellirack/+/data");
-		console.log("  - intellirack/");
+		client.subscribe(topics, (subscribeErr) => {
+			if (subscribeErr) {
+				console.error("❌ MQTT subscribe error:", subscribeErr.message);
+				return;
+			}
 
-		// Start device status monitoring
-		startStatusMonitoring(io);
+			console.log("📡 Subscribed to MQTT topics:");
+			topics.forEach((topic) => console.log(`  - ${topic}`));
+
+			// Start device status monitoring after subscriptions succeed
+			startStatusMonitoring(io);
+		});
 	});
 
 	client.on("message", async (topic, message) => {
@@ -139,12 +172,9 @@ function setupMQTT(io) {
 
 			// Handle different message types
 			if (topic.includes("/heartbeat")) {
-				// await handleDeviceHeartbeat(deviceId, payload, io);
-				handleDeviceHeartbeat(deviceId, payload, io);
+				await handleDeviceHeartbeat(deviceId, payload, io);
 			} else if (topic.includes("/status")) {
-				// Device status update
-				// await handleDeviceHeartbeat(deviceId, payload, io);
-				handleDeviceHeartbeat(deviceId, payload, io);
+				await handleDeviceHeartbeat(deviceId, payload, io);
 			} else if (topic.includes("/response")) {
 				// Command response from device
 				console.log(`Command response from ${deviceId}:`, payload);
@@ -199,7 +229,7 @@ function setupMQTT(io) {
 
 				// Also send to mqttHandler for processing - ensure deviceId consistency
 				const correctedPayload = { ...payload, deviceId: deviceId };
-				handleMQTTMessage(correctedPayload, io);
+				await handleMQTTMessage(correctedPayload, io);
 			} else if (
 				topic.includes("/weight") ||
 				topic.includes("/data") ||
@@ -208,12 +238,12 @@ function setupMQTT(io) {
 				// Weight/ingredient data - ensure deviceId consistency
 				console.log(`📊 Processing weight data for device: ${deviceId}`);
 				const correctedPayload = { ...payload, deviceId: deviceId };
-				handleMQTTMessage(correctedPayload, io);
+				await handleMQTTMessage(correctedPayload, io);
 			} else {
 				// Default handling for other topics - ensure deviceId consistency
 				console.log(`🔄 Processing other MQTT message for device: ${deviceId}`);
 				const correctedPayload = { ...payload, deviceId: deviceId };
-				handleMQTTMessage(correctedPayload, io);
+				await handleMQTTMessage(correctedPayload, io);
 			}
 		} catch (err) {
 			console.error("❌ MQTT Error:", err.message);
@@ -224,6 +254,11 @@ function setupMQTT(io) {
 
 	client.on("error", (error) => {
 		console.error("❌ MQTT Connection Error:", error);
+		if (error && error.message === "connack timeout") {
+			console.error(
+				"⚠️ MQTT connack timeout: broker accepted TCP/TLS but did not return CONNACK in time. Check protocol (mqtt/mqtts/ws/wss), broker listener port, and credentials."
+			);
+		}
 	});
 
 	client.on("reconnect", () => {
@@ -231,7 +266,11 @@ function setupMQTT(io) {
 	});
 
 	client.on("close", () => {
-		console.log("🔌 MQTT connection closed");
+		console.log(`🔌 MQTT connection closed (connected=${client.connected})`);
+	});
+
+	client.on("offline", () => {
+		console.log("📴 MQTT client offline");
 	});
 
 	return client;

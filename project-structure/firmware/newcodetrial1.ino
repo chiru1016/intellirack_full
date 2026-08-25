@@ -54,6 +54,18 @@ void handleNFCReadAPI();
 void handleNFCWriteAPI();
 void handleNFCClearAPI();
 void handleNFCStatusAPI();
+void handleNFCFormatAPI();
+void handleRestartAPI();
+void handleResetWiFiAPI();
+void handleSetConfigAPI();
+void handleSetThresholdsAPI();
+void handleSetDeviceAPI();
+void handleSetMQTTAPI();
+void handleLEDOnAPI();
+void handleLEDOffAPI();
+void handleAutoTareOnAPI();
+void handleAutoTareOffAPI();
+void handleSaveConfigAPI();
 void formatNFCTag();
 void testLEDs();
 void attemptNFCRecovery();
@@ -62,7 +74,7 @@ void attemptNFCRecovery();
 const int LOADCELL_DOUT_PIN = 5;
 const int LOADCELL_SCK_PIN = 15;
 HX711 scale;
-float calibration_factor = 113.81;
+float calibration_factor = -113.81;
 
 // WS2812B LED Setup
 #define LED_PIN     13
@@ -165,6 +177,11 @@ String currentIngredient = "";
 float lastWeight = 0;
 unsigned long lastMqttPublish = 0;
 
+// Post-tare stabilization — ignore sensor noise for a few seconds after any tare
+bool postTareStabilizing = false;
+unsigned long postTareTime = 0;
+const unsigned long POST_TARE_SETTLE_MS = 4000; // 4 s for HX711 to settle after tare
+
 // Command variables
 String pendingIngredientWrite = "";
 bool calibrationMode = false;
@@ -257,46 +274,27 @@ void setup() {
     setupOTA();
   }
 
-  // Initialize scale with smart startup weight detection
+  // Initialize scale and auto-tare on every boot
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
   scale.set_scale(calibration_factor);
-  
-  // Check for pre-existing weight before taring
-  Serial.println("Checking for pre-existing weight on scale...");
-  delay(1000); // Let scale stabilize
-  
-  float preStartupWeight = scale.get_units(10); // Take 10 readings for accuracy
-  Serial.println("Pre-startup raw reading: " + String(preStartupWeight, 2) + "g");
-  
-  if (abs(preStartupWeight) > WEIGHT_THRESHOLD_MIN) {
-    // Weight detected - preserve it and continue normally!
-    lastWeight = preStartupWeight; // Use the detected weight
-    weightPreservedAtStartup = true; // Mark for status tracking
-    Serial.println("✅ WEIGHT DETECTED ON SCALE: " + String(preStartupWeight, 1) + "g");
-    Serial.println("✅ Preserving weight measurement - continuing normal operation");
-    Serial.println("✅ Skipping auto-tare to maintain accuracy");
-    
-    if (displayAvailable) {
-      display.clearDisplay();
-      display.setCursor(0, 0);
-      display.println("WEIGHT PRESERVED");
-      display.setCursor(0, 10);
-      display.println("Detected:");
-      display.setCursor(0, 20);
-      display.println(formatWeight(preStartupWeight));
-      display.setCursor(0, 30);
-      display.println("Status: " + getStockStatus(preStartupWeight));
-      display.setCursor(0, 50);
-      display.println("Continuing...");
-      display.display();
-      delay(3000); // Show status for 3 seconds
-    }
-  } else {
-    // No significant weight - safe to tare
-    Serial.println("✅ No significant weight detected - performing auto-tare");
-    scale.tare();
-    lastWeight = 0.0; // Start from zero
+
+  Serial.println("Waiting for scale to stabilize...");
+  delay(2000); // Let the load cell settle before taring
+
+  if (displayAvailable) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Taring...");
+    display.setCursor(0, 10);
+    display.println("Please wait");
+    display.display();
   }
+
+  scale.tare(20); // Average 20 readings for a stable zero baseline
+  lastWeight = 0.0;
+  postTareStabilizing = true;
+  postTareTime = millis();
+  Serial.println("✅ Auto-tare on startup complete — scale zeroed (4 s stabilization started)");
 
   // Initialize NFC with error handling
   Serial.println("Initializing PN532 NFC module...");
@@ -318,16 +316,11 @@ void setup() {
     nfcAvailable = false;
   }
 
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println("Ready");
-  display.display();
-  
-  // Report startup weight status via MQTT if weight was detected
-  if (abs(preStartupWeight) > WEIGHT_THRESHOLD_MIN && mqttEnabled) {
-    delay(2000); // Give MQTT time to establish
-    publishMQTTResponse("startup_info", "Weight preserved at startup: " + formatWeight(preStartupWeight) + "g. Status: " + getStockStatus(preStartupWeight) + ". Auto-tare skipped.");
-    publishMQTTData(); // Send the current weight data immediately
+  if (displayAvailable) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Ready");
+    display.display();
   }
 }
 
@@ -603,13 +596,25 @@ void setupWebServer() {
   server.on("/", handleRoot);
   server.on("/api/weight", handleWeightAPI);
   server.on("/api/status", handleStatusAPI);
-  server.on("/api/tare", handleTareAPI);
-  server.on("/api/calibrate", handleCalibrateAPI);
+  server.on("/api/tare", HTTP_GET, handleTareAPI);
+  server.on("/api/calibrate", HTTP_POST, handleCalibrateAPI);
   server.on("/api/discovery", handleDiscoveryAPI); // New discovery endpoint
-  server.on("/api/nfc/read", handleNFCReadAPI); // NFC read endpoint
-  server.on("/api/nfc/write", handleNFCWriteAPI); // NFC write endpoint
-  server.on("/api/nfc/clear", handleNFCClearAPI); // NFC clear endpoint
-  server.on("/api/nfc/status", handleNFCStatusAPI); // NFC status endpoint
+  server.on("/api/nfc/read", HTTP_GET, handleNFCReadAPI); // NFC read endpoint
+  server.on("/api/nfc/write", HTTP_POST, handleNFCWriteAPI); // NFC write endpoint
+  server.on("/api/nfc/clear", HTTP_POST, handleNFCClearAPI); // NFC clear endpoint
+  server.on("/api/nfc/status", HTTP_GET, handleNFCStatusAPI); // NFC status endpoint
+  server.on("/api/nfc/format", HTTP_POST, handleNFCFormatAPI); // NFC format endpoint
+  server.on("/api/restart", HTTP_POST, handleRestartAPI); // Restart endpoint
+  server.on("/api/resetwifi", HTTP_POST, handleResetWiFiAPI); // Reset WiFi endpoint
+  server.on("/api/set-config", HTTP_POST, handleSetConfigAPI); // Config endpoint
+  server.on("/api/set-thresholds", HTTP_POST, handleSetThresholdsAPI); // Threshold endpoint
+  server.on("/api/set-device", HTTP_POST, handleSetDeviceAPI); // Device settings endpoint
+  server.on("/api/set-mqtt", HTTP_POST, handleSetMQTTAPI); // MQTT settings endpoint
+  server.on("/api/led/on", HTTP_POST, handleLEDOnAPI); // LED on endpoint
+  server.on("/api/led/off", HTTP_POST, handleLEDOffAPI); // LED off endpoint
+  server.on("/api/auto-tare/on", HTTP_POST, handleAutoTareOnAPI); // Auto tare on endpoint
+  server.on("/api/auto-tare/off", HTTP_POST, handleAutoTareOffAPI); // Auto tare off endpoint
+  server.on("/api/save-config", HTTP_POST, handleSaveConfigAPI); // Save config endpoint
   server.onNotFound(handleNotFound);
 }
 
@@ -665,13 +670,16 @@ void handleStatusAPI() {
 }
 
 void handleTareAPI() {
-  scale.tare();
+  scale.tare(20);
+  lastWeight = 0.0;
+  postTareStabilizing = true;
+  postTareTime = millis();
   server.send(200, "text/plain", "Scale tared successfully");
 }
 
 void handleCalibrateAPI() {
-  server.send(200, "text/plain", "Calibration started. Check serial monitor for instructions.");
-  // Note: Full calibration requires serial interaction
+  calibrateScaleAuto(100.0);
+  server.send(200, "text/plain", "Calibration started with 100g known weight.");
 }
 
 void handleDiscoveryAPI() {
@@ -743,14 +751,144 @@ void handleNFCStatusAPI() {
   server.send(200, "application/json", json);
 }
 
+void handleNFCFormatAPI() {
+  formatNFCTag();
+  server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"NFC tag formatted successfully\"}");
+}
+
+void handleRestartAPI() {
+  server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Device restarting...\"}");
+  delay(1000);
+  ESP.restart();
+}
+
+void handleResetWiFiAPI() {
+  wifiManager.resetSettings();
+  server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"WiFi settings reset, restarting...\"}");
+  delay(1000);
+  ESP.restart();
+}
+
+void handleSetConfigAPI() {
+  if (!server.hasArg("plain")) {
+    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"No JSON body provided\"}");
+    return;
+  }
+
+  DynamicJsonDocument doc(1024);
+  DeserializationError error = deserializeJson(doc, server.arg("plain"));
+  if (error) {
+    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid JSON body\"}");
+    return;
+  }
+
+  handleSetConfig(doc);
+  server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Configuration updated\"}");
+}
+
+void handleSetThresholdsAPI() {
+  if (!server.hasArg("plain")) {
+    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"No JSON body provided\"}");
+    return;
+  }
+
+  DynamicJsonDocument doc(1024);
+  DeserializationError error = deserializeJson(doc, server.arg("plain"));
+  if (error) {
+    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid JSON body\"}");
+    return;
+  }
+
+  handleSetThresholds(doc);
+  server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Thresholds updated\"}");
+}
+
+void handleSetDeviceAPI() {
+  if (!server.hasArg("plain")) {
+    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"No JSON body provided\"}");
+    return;
+  }
+
+  DynamicJsonDocument doc(1024);
+  DeserializationError error = deserializeJson(doc, server.arg("plain"));
+  if (error) {
+    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid JSON body\"}");
+    return;
+  }
+
+  handleSetDevice(doc);
+  server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Device settings updated\"}");
+}
+
+void handleSetMQTTAPI() {
+  if (!server.hasArg("plain")) {
+    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"No JSON body provided\"}");
+    return;
+  }
+
+  DynamicJsonDocument doc(512);
+  DeserializationError error = deserializeJson(doc, server.arg("plain"));
+  if (error) {
+    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid JSON body\"}");
+    return;
+  }
+
+  handleSetMQTT(doc);
+  server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"MQTT settings updated\"}");
+}
+
+void handleLEDOnAPI() {
+  LED_ENABLED = true;
+  saveConfiguration();
+  server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"LED enabled\"}");
+}
+
+void handleLEDOffAPI() {
+  LED_ENABLED = false;
+  saveConfiguration();
+  server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"LED disabled\"}");
+}
+
+void handleAutoTareOnAPI() {
+  AUTO_TARE = true;
+  saveConfiguration();
+  server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Auto tare enabled\"}");
+}
+
+void handleAutoTareOffAPI() {
+  AUTO_TARE = false;
+  saveConfiguration();
+  server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Auto tare disabled\"}");
+}
+
+void handleSaveConfigAPI() {
+  saveConfiguration();
+  server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Configuration saved\"}");
+}
+
 void handleNotFound() {
   server.send(404, "text/plain", "Not found");
 }
 
 void loop() {
-  float weight = scale.get_units(5);
-  
-  if (abs(weight - lastWeight) > 0.5) {
+  float weight = scale.get_units(10); // average 10 readings to reduce noise
+
+  // During post-tare stabilization, force zero so sensor noise does not appear on display.
+  if (postTareStabilizing) {
+    if (millis() - postTareTime < POST_TARE_SETTLE_MS) {
+      weight = 0.0;
+    } else {
+      postTareStabilizing = false;
+      Serial.println("Post-tare stabilization complete — accepting live readings");
+    }
+  }
+
+  // Clamp anything within the minimum threshold to exactly 0.0.
+  // This absorbs post-tare thermal drift and negative creep.
+  if (abs(weight) < WEIGHT_THRESHOLD_MIN) weight = 0.0;
+
+  // Only update when change exceeds 2g deadband
+  if (abs(weight - lastWeight) > 2.0) {
     lastWeight = weight;
     updateDisplay();
     if(mqttEnabled) {
@@ -838,7 +976,7 @@ void loop() {
   if (systemErrors > 50) {
     Serial.println("Too many system errors detected - performing controlled restart");
     Serial.println("⚠️  Current weight: " + formatWeight(lastWeight) + " - this will be lost after restart");
-    Serial.println("⚠️    Remove items from scale before restart to avoid measurement errors");
+    Serial.println("⚠️  Remove items from scale before restart to avoid measurement errors");
     
     if (spiffsAvailable) saveConfiguration();
     
@@ -1147,7 +1285,7 @@ void writeIngredientToTag(String ingredient) {
 }
 
 String formatWeight(float weight) {
-  if (abs(weight) < 0.1) return "0.0g";
+  if (abs(weight) < 1.0) return "0.0g";
   if (weight >= 1000.0) return String(weight / 1000.0, 2) + "kg";
   if (weight >= 10.0) return String(weight, 0) + "g";
   return String(weight, 1) + "g";
@@ -1268,20 +1406,27 @@ void handleSerialCommands() {
 
 void performTare() {
   Serial.println("Taring scale...");
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println("Taring...");
-  display.display();
-  
+  if (displayAvailable) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Taring...");
+    display.display();
+  }
+
   delay(2000);
-  scale.tare();
-  
-  Serial.println("Tare complete");
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println("Tare complete");
-  display.display();
-  delay(1000);
+  scale.tare(20); // average 20 readings for a stable tare baseline
+  lastWeight = 0.0; // force display to show exactly 0.0 immediately
+  postTareStabilizing = true;
+  postTareTime = millis();
+
+  Serial.println("Tare complete — 4 s stabilization started");
+  if (displayAvailable) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Tare complete");
+    display.display();
+    delay(1000);
+  }
   updateDisplay();
 }
 
@@ -1648,7 +1793,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 	Serial.println("Processing as string command: " + message);
 	if (message == "tare") {
 		Serial.println("[MQTT] Command: tare");
-		scale.tare();
+		scale.tare(20);
+		lastWeight = 0.0;
+		postTareStabilizing = true;
+		postTareTime = millis();
 		publishMQTTResponse("tare", "Scale tared successfully");
 	} else if (message == "status") {
 		Serial.println("[MQTT] Command: status");
@@ -2164,7 +2312,7 @@ void factoryReset() {
   WEIGHT_GOOD = 500.0;
   WEIGHT_MAX = 5000.0;
   LED_ENABLED = true;
-  SOUND_ENABLED = false;
+  SOUND_ENABLED = false;8
   MQTT_PUBLISH_INTERVAL = 5000;
   AUTO_TARE = false;
   TARE_THRESHOLD = -20.0;

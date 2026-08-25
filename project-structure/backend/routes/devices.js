@@ -4,16 +4,42 @@ const Device = require("../models/Device");
 const auth = require("../middleware/auth");
 const User = require("../models/User");
 
+async function generateUniqueRackId(baseId) {
+	let suffix = 2;
+	while (suffix < 100) {
+		const candidateId = `${baseId}_${suffix}`;
+		const existing = await Device.findOne({ rackId: candidateId });
+		if (!existing) return candidateId;
+		suffix++;
+	}
+	return `${baseId}_${Date.now()}`;
+}
+
 // Register a new device
 router.post("/register", auth, async (req, res) => {
-	const { name, rackId, location, firmwareVersion } = req.body;
+	let { name, rackId, location, firmwareVersion } = req.body;
 	try {
-		// Check if device already exists
+		// If rackId already exists, auto-generate a unique alias
 		const existingDevice = await Device.findOne({ rackId });
 		if (existingDevice) {
-			return res
-				.status(400)
-				.json({ error: "Device with this Rack ID already exists" });
+			const aliasRackId = await generateUniqueRackId(rackId);
+			console.log(`⚠️ rackId ${rackId} already exists — assigning alias ${aliasRackId}`);
+			const device = new Device({
+				name,
+				rackId: aliasRackId,
+				physicalId: rackId,
+				location,
+				firmwareVersion: firmwareVersion || "v2.0",
+				owner: req.user._id,
+			});
+			await device.save();
+			await User.findByIdAndUpdate(req.user._id, {
+				$push: { devices: device._id },
+			});
+			return res.status(201).json({
+				...device.toObject(),
+				_aliasNote: `rackId ${rackId} was already taken — assigned ${aliasRackId}`,
+			});
 		}
 
 		const device = new Device({
@@ -50,7 +76,7 @@ router.get("/status", auth, async (req, res) => {
 	try {
 		const devices = await Device.find({ owner: req.user._id })
 			.select(
-				"rackId name isOnline lastSeen lastWeight lastStatus ipAddress firmwareVersion"
+				"rackId name isOnline lastSeen lastWeight lastStatus ipAddress staticIp firmwareVersion"
 			)
 			.sort({ lastSeen: -1 });
 		res.json(devices);
@@ -142,6 +168,32 @@ router.delete("/:rackId", auth, async (req, res) => {
 		res.json({ message: "Device deleted successfully" });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
+	}
+});
+
+// Set or clear the static IP for a device
+router.put("/:rackId/static-ip", auth, async (req, res) => {
+	try {
+		const { staticIp } = req.body;
+
+		const device = await Device.findOneAndUpdate(
+			{ rackId: req.params.rackId, owner: req.user._id },
+			{ staticIp: staticIp || null },
+			{ new: true }
+		);
+
+		if (!device) return res.status(404).json({ error: "Device not found" });
+
+		res.json({
+			rackId: device.rackId,
+			staticIp: device.staticIp,
+			ipAddress: device.ipAddress,
+			message: staticIp
+				? `Static IP set to ${staticIp}`
+				: "Static IP cleared — will auto-update from heartbeat",
+		});
+	} catch (err) {
+		res.status(400).json({ error: err.message });
 	}
 });
 

@@ -8,27 +8,36 @@ const setupMQTT = require("./mqtt/client");
 const Device = require("./models/Device");
 const User = require("./models/User");
 
+if (typeof fetch === "undefined") {
+	global.fetch = require("node-fetch");
+}
+
+const defaultOrigins = [
+	"http://localhost:3000",
+	"http://localhost:3001",
+	"http://localhost:5173",
+	"http://localhost:3030",
+	"https://intellirack.judesonleo.dev",
+	"https://intellirack.judesonleo.me",
+];
+const envOrigins = (process.env.CORS_ORIGINS || "")
+	.split(",")
+	.map((origin) => origin.trim())
+	.filter(Boolean);
+const allowedOrigins = [...defaultOrigins, ...envOrigins];
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
 	cors: {
-		origin: [
-			"http://localhost:3000",
-			"http://localhost:3030",
-			"https://intellirack.judesonleo.dev",
-		],
+		origin: allowedOrigins,
 		credentials: true,
 		methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
 		allowedHeaders: ["Content-Type", "Authorization"],
 	},
 });
 const corsOptions = {
-	origin: [
-		"http://localhost:3000",
-		"http://localhost:3001",
-		"https://intellirack.judesonleo.dev",
-		"https://intellirack.judesonleo.me",
-	],
+	origin: allowedOrigins,
 	credentials: true,
 	methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
 	allowedHeaders: ["Content-Type", "Authorization"],
@@ -49,6 +58,7 @@ app.use("/api/nfc", require("./routes/nfc"));
 app.use("/api/ingredients", require("./routes/ingredients"));
 app.use("/api/discovery", require("./routes/discovery"));
 app.use("/api/user", require("./routes/user"));
+app.use("/api/twin", require("./routes/twin"));
 
 // Metrics and monitoring endpoints
 app.use("/api/metrics", require("./routes/metrics"));
@@ -63,6 +73,97 @@ function normalizeIpAddress(ipAddress) {
 	if (ipAddress === undefined || ipAddress === null) return undefined;
 	const normalized = String(ipAddress).trim();
 	return normalized || undefined;
+}
+
+function buildHttpCommandRequest(command, commandData = {}) {
+	switch (command) {
+		case "tare":
+			return { path: "/api/tare", method: "GET" };
+		case "calibrate":
+			return { path: "/api/calibrate", method: "POST" };
+		case "restart":
+			return { path: "/api/restart", method: "POST" };
+		case "resetwifi":
+			return { path: "/api/resetwifi", method: "POST" };
+		case "set_config":
+			return {
+				path: "/api/set-config",
+				method: "POST",
+				body: JSON.stringify(commandData),
+				headers: { "Content-Type": "application/json" },
+			};
+		case "set_thresholds":
+			return {
+				path: "/api/set-thresholds",
+				method: "POST",
+				body: JSON.stringify(commandData),
+				headers: { "Content-Type": "application/json" },
+			};
+		case "set_device":
+			return {
+				path: "/api/set-device",
+				method: "POST",
+				body: JSON.stringify(commandData),
+				headers: { "Content-Type": "application/json" },
+			};
+		case "set_mqtt":
+			return {
+				path: "/api/set-mqtt",
+				method: "POST",
+				body: JSON.stringify(commandData),
+				headers: { "Content-Type": "application/json" },
+			};
+		case "nfc_read":
+			return { path: "/api/nfc/read", method: "GET" };
+		case "nfc_write":
+		case "write":
+			return {
+				path: "/api/nfc/write",
+				method: "POST",
+				body: commandData.ingredient ? String(commandData.ingredient).trim() : "",
+				headers: { "Content-Type": "text/plain" },
+			};
+		case "nfc_clear":
+		case "clear":
+			return { path: "/api/nfc/clear", method: "POST" };
+		case "nfc_format":
+		case "format":
+			return { path: "/api/nfc/format", method: "POST" };
+		case "led_on":
+			return { path: "/api/led/on", method: "POST" };
+		case "led_off":
+			return { path: "/api/led/off", method: "POST" };
+		case "auto_tare_on":
+			return { path: "/api/auto-tare/on", method: "POST" };
+		case "auto_tare_off":
+			return { path: "/api/auto-tare/off", method: "POST" };
+		case "save_config":
+			return { path: "/api/save-config", method: "POST" };
+		default:
+			return null;
+	}
+}
+
+async function sendDeviceHttpCommand(device, command, commandData = {}) {
+	const requestConfig = buildHttpCommandRequest(command, commandData);
+	const targetIp = device?.staticIp || device?.ipAddress;
+	if (!device || !targetIp || !requestConfig) {
+		return { used: false };
+	}
+
+	const url = `http://${targetIp}${requestConfig.path}`;
+	const response = await fetch(url, {
+		method: requestConfig.method,
+		headers: requestConfig.headers || {},
+		body: requestConfig.body,
+	});
+	const responseText = await response.text();
+
+	if (!response.ok) {
+		throw new Error(`HTTP ${response.status}: ${responseText}`);
+	}
+
+	return { used: true, response: responseText, url };
 }
 
 // WebSocket connection handling
@@ -115,6 +216,7 @@ io.on("connection", (socket) => {
 		try {
 			const { deviceId, command, ...commandData } = data;
 			const normalizedRackId = normalizeRackId(deviceId);
+			let targetRackId = normalizedRackId;
 
 			console.log(
 				`Sending command to device ${deviceId} (normalized: ${normalizedRackId}):`,
@@ -128,22 +230,55 @@ io.on("connection", (socket) => {
 			}
 
 			// For non-broadcast commands, verify device ownership
+			let device = null;
 			if (command !== "broadcast" && deviceId !== "broadcast") {
-				const device = await Device.findOne({ rackId: normalizedRackId }).populate(
-					"owner"
-				);
+				const deviceQuery = {
+					rackId: new RegExp(`^${String(deviceId).trim()}$`, "i"),
+				};
+
+				if (mongoose.Types.ObjectId.isValid(deviceId)) {
+					deviceQuery.$or = [{ _id: deviceId }, { rackId: deviceQuery.rackId }];
+				}
+
+				device = await Device.findOne(deviceQuery).populate("owner");
 				if (!device) {
 					throw new Error(`Device not found: ${normalizedRackId}`);
 				}
 				if (device.owner._id.toString() !== socket.userId.toString()) {
 					throw new Error("Not authorized to control this device");
 				}
+				targetRackId = device.rackId;
 			}
 
 			// Get MQTT client from app settings
 			const mqttClient = app.get("mqttClient");
 			if (!mqttClient) {
 				throw new Error("MQTT client not available");
+			}
+
+			let actionResult = null;
+			try {
+				actionResult = await sendDeviceHttpCommand(device, command, commandData);
+			} catch (httpError) {
+				console.warn(
+					`⚠️ HTTP command failed for ${command} on ${targetRackId}; falling back to MQTT: ${httpError.message}`
+				);
+			}
+
+			if (actionResult && actionResult.used) {
+				console.log(
+					`✅ HTTP command executed for ${targetRackId} via ${actionResult.url}`
+				);
+				socket.emit("commandSent", { deviceId: targetRackId, command, success: true });
+				socket.emit("commandResponse", {
+					deviceId: targetRackId,
+					command,
+					response: actionResult.response,
+					message: actionResult.response,
+					success: true,
+					timestamp: new Date(),
+				});
+				return;
 			}
 
 			// Determine MQTT topic based on command type
@@ -158,8 +293,8 @@ io.on("connection", (socket) => {
 					...commandData,
 				});
 			} else {
-				// Device-specific command - use normalized rackId
-				topic = `intellirack/${normalizedRackId}/command`;
+				// Device-specific command - use canonical rackId from database.
+				topic = `intellirack/${targetRackId}/command`;
 				// Always send plain string for nfc_write or write
 				if (
 					(command === "nfc_write" || command === "write") &&
@@ -175,12 +310,12 @@ io.on("connection", (socket) => {
 						error: "No ingredient specified for NFC write.",
 					});
 					return;
-				} else if (typeof command === "string" && !commandData.ingredient) {
+				} else if (Object.keys(commandData).length === 0) {
 					// For simple commands like "tare", "nfc_read", etc.
 					message = command;
 				} else {
-					// Send as JSON for other commands
-					message = JSON.stringify({ command, deviceId: normalizedRackId, ...commandData });
+					// Send as JSON for commands that carry settings or calibration data.
+					message = JSON.stringify({ command, deviceId: targetRackId, ...commandData });
 				}
 			}
 
@@ -194,7 +329,7 @@ io.on("connection", (socket) => {
 				)})`
 			);
 			console.log(
-				`Target deviceId: ${deviceId} (normalized: ${normalizedRackId}), Command: ${command}, User: ${socket.userId}`
+				`Target deviceId: ${deviceId} (topic target: ${targetRackId}), Command: ${command}, User: ${socket.userId}`
 			);
 
 			// Verify MQTT client exists before publishing
@@ -207,7 +342,7 @@ io.on("connection", (socket) => {
 				if (publishErr) {
 					console.error(`❌ MQTT publish error for ${topic}:`, publishErr.message);
 					socket.emit("commandSent", {
-						deviceId: normalizedRackId,
+						deviceId: targetRackId,
 						command,
 						success: false,
 						error: `MQTT publish failed: ${publishErr.message}`,
@@ -215,7 +350,7 @@ io.on("connection", (socket) => {
 				} else {
 					console.log(`✅ MQTT message published successfully to ${topic}`);
 					// Acknowledge command sent
-					socket.emit("commandSent", { deviceId: normalizedRackId, command, success: true });
+					socket.emit("commandSent", { deviceId: targetRackId, command, success: true });
 				}
 			});
 		} catch (error) {
@@ -347,25 +482,49 @@ io.on("connection", (socket) => {
 				}
 			}
 
-			// Check if device already exists
+			// Check if device already exists — if so, auto-assign an alias rackId
 			const existingDevice = await Device.findOne({ rackId: normalizedRackId });
+			let assignedRackId = normalizedRackId;
+			let physicalId = null;
+
 			if (existingDevice) {
-				console.log("Device already exists:", existingDevice._id);
-				socket.emit("deviceRegistered", {
-					success: false,
-					error: "Device with this Rack ID already exists",
-				});
-				return;
+				// Same device re-registering (same IP or static IP) — just update and confirm
+				const sameDevice =
+					(normalizedIpAddress && existingDevice.ipAddress === normalizedIpAddress) ||
+					existingDevice.staticIp;
+
+				if (sameDevice) {
+					console.log("Device already exists with same IP, returning existing:", existingDevice._id);
+					socket.emit("deviceRegistered", {
+						success: true,
+						message: "Device already registered",
+						device: existingDevice,
+					});
+					return;
+				}
+
+				// Different physical device sharing the same firmware rackId — create an alias
+				let suffix = 2;
+				while (suffix < 100) {
+					const candidate = `${normalizedRackId}_${suffix}`;
+					const taken = await Device.findOne({ rackId: candidate });
+					if (!taken) { assignedRackId = candidate; break; }
+					suffix++;
+				}
+				physicalId = normalizedRackId;
+				console.log(`⚠️ rackId ${normalizedRackId} conflict — assigning alias ${assignedRackId} (physicalId: ${physicalId})`);
 			}
 
-			// Create new device
+			// Create new device (pin staticIp for aliased devices to prevent cross-device IP pollution)
 			const device = new Device({
-				name: name || `IntelliRack ${normalizedRackId}`,
-				rackId: normalizedRackId,
+				name: name || `IntelliRack ${assignedRackId}`,
+				rackId: assignedRackId,
+				physicalId,
 				location: location || "Unknown",
 				firmwareVersion: firmwareVersion || "v2.0",
 				owner: socket.userId,
 				ipAddress: normalizedIpAddress,
+				staticIp: physicalId ? normalizedIpAddress : null,
 				isOnline: true,
 				lastSeen: new Date(),
 				weightThresholds: {
@@ -400,13 +559,15 @@ io.on("connection", (socket) => {
 
 			socket.emit("deviceRegistered", {
 				success: true,
-				message: "Device registered successfully",
+				message: physicalId
+					? `Device registered as ${assignedRackId} (alias for ${physicalId})`
+					: "Device registered successfully",
 				device: device,
 			});
 
 			// Notify only the user who registered the device
 			io.to(`user:${socket.userId}`).emit("deviceAdded", {
-				deviceId: normalizedRackId,
+				deviceId: assignedRackId,
 				device: device,
 			});
 		} catch (error) {

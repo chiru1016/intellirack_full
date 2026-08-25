@@ -10,6 +10,11 @@ const DeviceList = ({ devices, onDeviceClick, onAddDevice, socket }) => {
 	const [isEditing, setIsEditing] = useState(false);
 	const [ingredientDetails, setIngredientDetails] = useState(null);
 
+	const normalizeId = (value) =>
+		value === undefined || value === null
+			? ""
+			: String(value).trim().toLowerCase();
+
 	useEffect(() => {
 		if (!socket) {
 			console.log("DeviceList: No socket available");
@@ -27,11 +32,14 @@ const DeviceList = ({ devices, onDeviceClick, onAddDevice, socket }) => {
 		// Create unique handlers for DeviceList with device filtering
 		const handleDeviceStatus = (data) => {
 			console.log(`${componentId} - deviceStatus received:`, data);
+			const incomingId = normalizeId(data.deviceId);
 
 			// Only process status for devices we know about
-			const isOurDevice = devices.some(
-				(d) => d.rackId === data.deviceId || d._id === data.deviceId
-			);
+			const isOurDevice = devices.some((d) => {
+				const rackId = normalizeId(d.rackId);
+				const mongoId = normalizeId(d._id);
+				return incomingId === rackId || incomingId === mongoId;
+			});
 
 			if (!isOurDevice) {
 				console.log(
@@ -47,7 +55,7 @@ const DeviceList = ({ devices, onDeviceClick, onAddDevice, socket }) => {
 
 			setDeviceStatus((prev) => {
 				const newMap = new Map(prev);
-				const currentStatus = newMap.get(data.deviceId) || {};
+				const currentStatus = newMap.get(incomingId) || {};
 				const updatedStatus = {
 					...currentStatus,
 					isOnline: data.isOnline,
@@ -60,7 +68,7 @@ const DeviceList = ({ devices, onDeviceClick, onAddDevice, socket }) => {
 					`${componentId} - Updating device ${data.deviceId}:`,
 					updatedStatus
 				);
-				newMap.set(data.deviceId, updatedStatus);
+				newMap.set(incomingId, updatedStatus);
 				return newMap;
 			});
 		};
@@ -68,11 +76,14 @@ const DeviceList = ({ devices, onDeviceClick, onAddDevice, socket }) => {
 		// Listen for general updates with device filtering
 		const handleUpdate = (data) => {
 			console.log(`${componentId} - update received:`, data);
+			const incomingId = normalizeId(data.deviceId);
 
 			// Only process updates for devices we know about
-			const isOurDevice = devices.some(
-				(d) => d.rackId === data.deviceId || d._id === data.deviceId
-			);
+			const isOurDevice = devices.some((d) => {
+				const rackId = normalizeId(d.rackId);
+				const mongoId = normalizeId(d._id);
+				return incomingId === rackId || incomingId === mongoId;
+			});
 
 			if (!isOurDevice) {
 				console.log(
@@ -88,7 +99,7 @@ const DeviceList = ({ devices, onDeviceClick, onAddDevice, socket }) => {
 
 			setDeviceStatus((prev) => {
 				const newMap = new Map(prev);
-				const currentStatus = newMap.get(data.deviceId) || {};
+				const currentStatus = newMap.get(incomingId) || {};
 				const updatedStatus = {
 					...currentStatus,
 					isOnline: data.isOnline ?? true,
@@ -101,7 +112,7 @@ const DeviceList = ({ devices, onDeviceClick, onAddDevice, socket }) => {
 					`${componentId} - Updating device ${data.deviceId}:`,
 					updatedStatus
 				);
-				newMap.set(data.deviceId, updatedStatus);
+				newMap.set(incomingId, updatedStatus);
 				return newMap;
 			});
 		};
@@ -125,7 +136,7 @@ const DeviceList = ({ devices, onDeviceClick, onAddDevice, socket }) => {
 				socket.off(event, handler);
 			});
 		};
-	}, [socket]);
+	}, [socket, devices]);
 
 	// Fetch ingredient summary for each device
 	// useEffect(() => {
@@ -231,7 +242,7 @@ const DeviceList = ({ devices, onDeviceClick, onAddDevice, socket }) => {
 
 	// Merge device data with real-time status (per-slot)
 	const devicesWithStatus = devices.map((device) => {
-		const status = deviceStatus.get(device.rackId);
+		const status = deviceStatus.get(normalizeId(device.rackId));
 		const mergedDevice = {
 			...device,
 			ingredient: status?.ingredient ?? device.ingredient,

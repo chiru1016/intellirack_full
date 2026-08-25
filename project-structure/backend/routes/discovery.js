@@ -8,6 +8,18 @@ const router = express.Router();
  * Handles dynamic device discovery and registration
  */
 
+async function generateUniqueRackId(baseId) {
+	let suffix = 2;
+	while (suffix < 100) {
+		const candidateId = `${baseId}_${suffix}`;
+		const existing = await Device.findOne({ rackId: candidateId });
+		if (!existing) return candidateId;
+		suffix++;
+	}
+	// Fallback: use timestamp suffix
+	return `${baseId}_${Date.now()}`;
+}
+
 // Auto-register device from discovery data
 router.post("/register", async (req, res) => {
 	try {
@@ -54,25 +66,49 @@ router.post("/register", async (req, res) => {
 			}
 		}
 
-		// Check if device already exists
-		let device = await Device.findOne({
-			$or: [{ rackId: deviceId }, { ipAddress: ipAddress }]
-		});
+		// Check if device already exists — match by rackId first, then by IP
+		let device = await Device.findOne({ rackId: deviceId });
+		if (!device) {
+			device = await Device.findOne({ physicalId: deviceId, ipAddress });
+		}
 
 		if (device) {
-			// Update existing device
-			device.name = name || device.name;
-			device.ipAddress = ipAddress;
-			device.macAddress = macAddress || device.macAddress;
-			device.firmwareVersion = firmwareVersion || device.firmwareVersion;
-			device.location = location;
-			device.owner = user._id;
-			device.isOnline = true;
-			device.lastSeen = new Date();
-			
-			await device.save();
-			
-			console.log(`🔄 Updated existing device: ${deviceId} at ${ipAddress}`);
+			const effectiveIp = device.staticIp || ipAddress;
+			const ipConflict = device.physicalId == null && !device.staticIp && device.ipAddress && device.ipAddress !== ipAddress;
+
+			if (ipConflict) {
+				// Different physical device using the same firmware rackId — assign a new alias rackId
+				const aliasRackId = await generateUniqueRackId(deviceId);
+				device = new Device({
+					name: name || `IntelliRack ${aliasRackId}`,
+					rackId: aliasRackId,
+					physicalId: deviceId,
+					location,
+					firmwareVersion: firmwareVersion || "v2.0",
+					owner: user._id,
+					ipAddress,
+					macAddress,
+					isOnline: true,
+					lastSeen: new Date(),
+					weightThresholds: { min: 5.0, low: 100.0, moderate: 200.0, good: 500.0, max: 5000.0 },
+					settings: { ledEnabled: true, soundEnabled: false, autoTare: false, mqttPublishInterval: 1000 },
+					calibrationFactor: 204.99,
+				});
+				await device.save();
+				console.log(`➕ Created aliased device: ${aliasRackId} (physicalId: ${deviceId}) at ${ipAddress}`);
+			} else {
+				// Update existing device — only update ipAddress if no static IP is pinned
+				device.name = name || device.name;
+				if (!device.staticIp) device.ipAddress = ipAddress;
+				device.macAddress = macAddress || device.macAddress;
+				device.firmwareVersion = firmwareVersion || device.firmwareVersion;
+				device.location = location;
+				device.owner = user._id;
+				device.isOnline = true;
+				device.lastSeen = new Date();
+				await device.save();
+				console.log(`🔄 Updated existing device: ${device.rackId} at ${device.staticIp || ipAddress}`);
+			}
 		} else {
 			// Create new device
 			device = new Device({
@@ -138,66 +174,105 @@ router.post("/register", async (req, res) => {
 // Scan network for IntelliRack devices
 router.post("/scan", async (req, res) => {
 	try {
-		const { ipRange = "192.168.1", startIp = 1, endIp = 254, timeout = 2000 } = req.body;
+		const { ipRange = "192.168.1", startIp = 1, endIp = 254, timeout = 1500 } = req.body;
 		
 		console.log(`🔍 Scanning network range: ${ipRange}.${startIp}-${endIp}`);
-		
-		const fetch = require('node-fetch');
-		const discoveredDevices = [];
-		const scanPromises = [];
 
-		// Create scan promises for IP range
-		for (let i = startIp; i <= endIp; i++) {
-			const ip = `${ipRange}.${i}`;
-			
-			const scanPromise = (async () => {
+		const fetchFn =
+			typeof fetch === "function" ? fetch.bind(globalThis) : null;
+		if (!fetchFn) {
+			throw new Error(
+				"Fetch API is unavailable in this Node runtime. Use Node 18+ or install a fetch polyfill."
+			);
+		}
+		const discoveredDevices = [];
+		const seenIds = new Set();
+		const discoveryPaths = ["/api/discovery", "/discovery"];
+
+		const looksLikeIntelliRack = (deviceInfo = {}) => {
+			const normalizedType = String(deviceInfo.type || "").toLowerCase();
+			return Boolean(
+				deviceInfo.deviceId ||
+				deviceInfo.rackId ||
+				normalizedType.includes("intellirack") ||
+				deviceInfo.firmwareVersion ||
+				deviceInfo.slotId
+			);
+		};
+
+		const normalizeDiscoveredDevice = (deviceInfo, ip) => {
+			const deviceId =
+				String(deviceInfo.deviceId || deviceInfo.rackId || "").trim() ||
+				`device-${ip}`;
+
+			return {
+				deviceId,
+				rackId: deviceInfo.rackId || deviceId,
+				name: deviceInfo.name || `IntelliRack ${deviceId}`,
+				type: deviceInfo.type || "IntelliRack",
+				firmwareVersion: deviceInfo.firmwareVersion || "unknown",
+				currentWeight: Number(deviceInfo.currentWeight || deviceInfo.weight || 0),
+				currentStatus: deviceInfo.currentStatus || deviceInfo.status || "ONLINE",
+				mqttConnected: Boolean(deviceInfo.mqttConnected),
+				macAddress: deviceInfo.macAddress || "",
+				ipAddress: ip,
+				discoveredAt: new Date(),
+			};
+		};
+
+		const probeHost = async (ip) => {
+			for (const path of discoveryPaths) {
+				let timeoutId;
 				try {
 					const controller = new AbortController();
-					const timeoutId = setTimeout(() => controller.abort(), timeout);
-					
-					const response = await fetch(`http://${ip}/api/discovery`, {
+					timeoutId = setTimeout(() => controller.abort(), timeout);
+					const response = await fetchFn(`http://${ip}${path}`, {
 						signal: controller.signal,
-						timeout: timeout
 					});
-					
-					clearTimeout(timeoutId);
-					
-					if (response.ok) {
-						const deviceInfo = await response.json();
-						
-						// Verify this is an IntelliRack device
-						if (deviceInfo.type === "IntelliRack" && deviceInfo.deviceId) {
-							return {
-								...deviceInfo,
-								ipAddress: ip,
-								discoveredAt: new Date()
-							};
-						}
-					}
+
+					if (!response.ok) continue;
+
+					const deviceInfo = await response.json();
+					if (!looksLikeIntelliRack(deviceInfo)) continue;
+
+					return normalizeDiscoveredDevice(deviceInfo, ip);
 				} catch (error) {
-					// Ignore errors - most IPs won't have devices
+					// Ignore host/path probe errors and continue probing other endpoints.
+				} finally {
+					if (timeoutId) clearTimeout(timeoutId);
 				}
-				return null;
-			})();
-			
-			scanPromises.push(scanPromise);
+			}
+
+			return null;
+		};
+
+		const hosts = [];
+		for (let i = startIp; i <= endIp; i++) {
+			hosts.push(`${ipRange}.${i}`);
 		}
 
-		// Wait for all scans with a reasonable batch size
-		const batchSize = 50;
-		for (let i = 0; i < scanPromises.length; i += batchSize) {
-			const batch = scanPromises.slice(i, i + batchSize);
+		// Probe hosts in true batches to avoid creating all network requests at once.
+		const batchSize = 40;
+		for (let i = 0; i < hosts.length; i += batchSize) {
+			const batchHosts = hosts.slice(i, i + batchSize);
+			const batch = batchHosts.map((ip) => probeHost(ip));
 			const results = await Promise.allSettled(batch);
 			
-			results.forEach(result => {
-				if (result.status === 'fulfilled' && result.value) {
-					discoveredDevices.push(result.value);
+			results.forEach((result) => {
+				if (result.status === "fulfilled" && result.value) {
+					const uniqueKey = String(
+						result.value.deviceId || result.value.rackId || result.value.ipAddress
+					).toLowerCase();
+					if (!seenIds.has(uniqueKey)) {
+						seenIds.add(uniqueKey);
+						discoveredDevices.push(result.value);
+					}
 				}
 			});
 			
 			// Small delay between batches to avoid overwhelming the network
-			if (i + batchSize < scanPromises.length) {
-				await new Promise(resolve => setTimeout(resolve, 100));
+			if (i + batchSize < hosts.length) {
+				await new Promise((resolve) => setTimeout(resolve, 50));
 			}
 		}
 

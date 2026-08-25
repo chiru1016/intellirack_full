@@ -239,10 +239,16 @@ router.get("/device/:deviceId", auth, async (req, res) => {
 
 		// Verify device ownership
 		const Device = require("../models/Device");
-		const device = await Device.findOne({
-			_id: req.params.deviceId,
-			owner: req.user._id,
-		});
+		const deviceQuery = { owner: req.user._id };
+		if (mongoose.Types.ObjectId.isValid(req.params.deviceId)) {
+			deviceQuery.$or = [
+				{ _id: req.params.deviceId },
+				{ rackId: req.params.deviceId },
+			];
+		} else {
+			deviceQuery.rackId = req.params.deviceId;
+		}
+		const device = await Device.findOne(deviceQuery);
 
 		if (!device) {
 			return res.status(404).json({ error: "Device not found" });

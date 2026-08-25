@@ -297,16 +297,17 @@ const DeviceSheet = ({ device, isOpen, onClose, socket }) => {
 		setMessageTimeout(newTimeout);
 	};
 
-	// Refactor sendCommand to treat all commands as simple strings
-	const sendCommand = async (command) => {
+	// Refactor sendCommand to forward optional command payload fields as well.
+	const sendCommand = async (command, extra = {}) => {
 		if (!socket || !device) return;
 		setIsLoading(true);
 		setMessageWithTimeout("");
 
 		try {
 			const commandData = {
-				deviceId: device.rackId,
+				deviceId: device.rackId || device._id,
 				command,
+				...extra,
 			};
 			socket.emit("sendCommand", commandData);
 			setMessageWithTimeout(`Command sent: ${command}`);
