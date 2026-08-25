@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getToken } from "@/lib/auth";
 
-const API_BASE = process.env.NEXT_API_URL;
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 function formatDate(value) {
 	if (!value) return "-";

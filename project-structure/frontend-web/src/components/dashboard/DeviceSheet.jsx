@@ -16,7 +16,7 @@ import {
 import CloseButton from "@/components/CloseButton";
 
 const DeviceSheet = ({ device, isOpen, onClose, socket }) => {
-	const API_BASE = process.env.NEXT_API_URL;
+	const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 	const nfcApi = (path = "") =>
 		API_BASE ? `${API_BASE}/nfc${path}` : `http://localhost:3030/api/nfc${path}`;
 
