@@ -19,6 +19,7 @@ const defaultOrigins = [
 	"http://localhost:3030",
 	"https://intellirack.judesonleo.dev",
 	"https://intellirack.judesonleo.me",
+	"https://intellirack-full-eta.vercel.app/",
 ];
 const envOrigins = (process.env.CORS_ORIGINS || "")
 	.split(",")
