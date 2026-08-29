@@ -93,7 +93,7 @@ WiFiClientSecure espClient;
 
 PubSubClient mqtt(espClient);
 bool mqttEnabled = false;
-const char* mqtt_server = "mqtt.judesonleo.app";
+const char* mqtt_server = "3ea321c1c4114effa6530718d7b7c468.s1.eu.hivemq.cloud";
 const int mqtt_port = 8883;
 const char* mqtt_user = "intellirack";
 const char* mqtt_pass = "intellirack@123";
@@ -1584,7 +1584,8 @@ void resetWiFi() {
 
 
 void setupMQTT() {
-  espClient.setCACert(ca_cert); // <-- Set the CA cert before connecting
+  espClient.setInsecure();
+  // espClient.setCACert(ca_cert); // <-- Set the CA cert before connecting
   mqtt.setServer(mqtt_server, mqtt_port);
   mqtt.setCallback(mqttCallback);
   
