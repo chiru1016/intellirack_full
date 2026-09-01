@@ -60,7 +60,6 @@ function setupMQTT(io) {
 	if (process.env.MQTT_PASSWORD) {
 		mqttOptions.password = process.env.MQTT_PASSWORD;
 	}
-
 	if (protocol) {
 		mqttOptions.protocol = protocol;
 	}

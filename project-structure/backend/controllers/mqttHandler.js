@@ -515,18 +515,14 @@ const utils = {
 	normalizeIngredient: (ingredient) => {
 		if (!ingredient || typeof ingredient !== "string") return null;
 
-		const cleanIngredient = ingredient.trim();
+		// Strip non-printable characters first (like \x00, \n, \r)
+		let cleanIngredient = ingredient.replace(/[^\x20-\x7E]/g, "").trim();
 
 		// Validation checks
 		if (
 			cleanIngredient.length < 1 ||
 			cleanIngredient.length > CONFIG.MAX_INGREDIENT_LENGTH
 		) {
-			return null;
-		}
-
-		// Check for non-printable characters
-		if (/[^\x20-\x7E]/.test(cleanIngredient)) {
 			return null;
 		}
 
@@ -1004,7 +1000,7 @@ async function compressOldData() {
 async function handleMQTTMessage(payload, io) {
 	const timer = performanceMonitor.startTimer("mqtt_message_processing");
 
-	const {
+	let {
 		deviceId: rawDeviceId,
 		slotId: rawSlotId,
 		tagUID,
@@ -1106,6 +1102,15 @@ async function handleMQTTMessage(payload, io) {
 			weight,
 			status,
 		});
+
+		// Resolve ingredient from tagUID if missing
+		if ((!ingredient || typeof ingredient !== "string" || ingredient.trim() === "") && tagUID) {
+			const tag = await NFCTag.findByUID(tagUID);
+			if (tag && tag.ingredient) {
+				ingredient = tag.ingredient;
+				console.log(`🔍 Resolved ingredient '${ingredient}' from tagUID ${tagUID}`);
+			}
+		}
 
 		// Always queue a Supabase snapshot so the digital twin receives every update
 		enqueueSupabaseSnapshot({
@@ -1354,7 +1359,7 @@ async function handleMQTTMessage(payload, io) {
 
 			// Handle NFC-specific events
 			if (command.startsWith("nfc_")) {
-				await handleNFCEvent(device, command, response, io);
+				await handleNFCEvent(device, command, response, io, finalSlotId);
 			}
 		}
 
@@ -1934,33 +1939,51 @@ async function sendWebhook(
 }
 
 // Handle NFC events
-async function handleNFCEvent(device, command, response, io) {
+async function handleNFCEvent(device, command, response, io, slotId = 1) {
 	try {
 		switch (command) {
 			case "nfc_read":
 				// Parse NFC read response
 				try {
-					const nfcData = JSON.parse(response);
+					const nfcData = typeof response === "string" ? JSON.parse(response) : response;
 					if (nfcData.tagPresent && nfcData.tagUID) {
 						// Find or create NFC tag
 						let tag = await NFCTag.findByUID(nfcData.tagUID);
+						
+						const ingredientName = nfcData.ingredient || "Unknown";
 
 						if (tag) {
 							// Update existing tag
 							await tag.incrementReadCount();
-
-							// Update ingredient status
-							await IngredientStatus.findOneAndUpdate(
-								{ device: device._id, slotId: tag.slotId },
-								{
-									ingredient: nfcData.ingredient || tag.ingredient,
-									tagUID: nfcData.tagUID,
-									lastUpdated: new Date(),
-									isOnline: true,
-								},
-								{ upsert: true, new: true }
-							);
+							if (nfcData.ingredient && tag.ingredient !== nfcData.ingredient) {
+								tag.ingredient = nfcData.ingredient;
+								await tag.save();
+							}
+						} else {
+							// Create new tag from the device read response
+							tag = await NFCTag.create({
+								uid: nfcData.tagUID.toUpperCase(),
+								ingredient: ingredientName,
+								deviceId: device._id,
+								slotId: slotId,
+								createdBy: getOwnerId(device),
+								status: "active",
+								readCount: 1,
+								lastSeen: new Date(),
+							});
 						}
+
+						// Update ingredient status
+						await IngredientStatus.findOneAndUpdate(
+							{ device: device._id, slotId: tag.slotId },
+							{
+								ingredient: tag.ingredient,
+								tagUID: tag.uid,
+								lastUpdated: new Date(),
+								isOnline: true,
+							},
+							{ upsert: true, new: true }
+						);
 
 						// Emit NFC read event
 						io.to(`user:${device.owner._id}`).emit("nfcEvent", {

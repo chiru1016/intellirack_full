@@ -76,7 +76,8 @@ app.use("/api/twin", require("./routes/twin"));
 
 // Metrics and monitoring endpoints
 app.use("/api/metrics", require("./routes/metrics"));
-app.use("/health", require("./routes/metrics")); // Health check at root level
+app.use("/api/health", require("./routes/metrics")); // Health check at root level
+app.use("/health", require("./routes/metrics"));
 
 function normalizeRackId(rackId) {
 	if (rackId === undefined || rackId === null) return "";

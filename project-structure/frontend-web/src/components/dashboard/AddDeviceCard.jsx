@@ -404,7 +404,7 @@ const AddDeviceCard = ({ onClick, socket }) => {
 		try {
 			const deviceData = {
 				...registrationForm,
-				rackId: device.deviceId || registrationForm.rackId,
+				rackId: registrationForm.rackId || device.deviceId,
 				firmwareVersion: device.firmwareVersion || "v2.0",
 				ipAddress: device.ipAddress,
 				macAddress: device.macAddress,
