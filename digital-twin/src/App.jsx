@@ -106,7 +106,7 @@ export default function App() {
             ● LIVE
           </div>
           <div style={{ color: '#1a1a1a', fontSize: 22, fontFamily: "'Syne', sans-serif", fontWeight: 800, letterSpacing: -0.5 }}>
-            Rack Telemetry Dashboard
+            Digital Twin Telemtry Dashboard
           </div>
         </div>
         <div style={{ textAlign: 'right' }}>

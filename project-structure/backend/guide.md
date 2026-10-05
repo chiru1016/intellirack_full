@@ -149,6 +149,36 @@ Retention policy implemented in SQL:
 3. Scheduler
 - pg_cron runs every 5 minutes using function archive_and_trim_rack_telemetry().
 
+## 7) Local PostgreSQL Telemetry Store
+
+The Supabase telemetry client is disabled and preserved as commented code in
+`services/supabase.js`. The same service API now uses the local PostgreSQL
+pool, so the MQTT handler and digital-twin routes do not need a data-contract
+change.
+
+Create the telemetry tables with:
+
+```bash
+psql "$POSTGRES_URL" -f postgres/schema.sql
+```
+
+Configure the backend with one of these connection styles:
+
+```env
+POSTGRES_URL=postgresql://intellirack:password@localhost:5432/intellirack
+# Optional:
+# PG_POOL_MAX=10
+# PGSSL=false
+```
+
+`POSTGRES_URL` enables the telemetry path. `DATABASE_URL` is also accepted,
+and `PGHOST` plus the standard `PGUSER`, `PGPASSWORD`, and `PGDATABASE`
+variables can be used instead.
+
+MongoDB remains the primary application database for users, devices,
+ingredient logs, statuses, alerts, NFC tags, billing, and audit data. Only the
+digital-twin telemetry mirror moves to PostgreSQL in this migration.
+
 Rack separation:
 - Every telemetry row includes rack_id and slot_id.
 - Current state is keyed by composite primary key (rack_id, slot_id).

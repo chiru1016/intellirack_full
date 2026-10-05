@@ -13,10 +13,17 @@ if (typeof fetch === "undefined") {
 }
 
 const defaultOrigins = [
+	"*",
 	"http://localhost:3000",
-	"http://localhost:3001",
+	"http://192.168.1.153:3000",
+	"http://localhost:3000",
 	"http://localhost:5173",
+	"http://127.0.0.1:5173",
+	"http://localhost:5174",
+	"http://localhost:3000",
+	"http://127.0.0.1:5174",
 	"http://localhost:3030",
+	"http://192.168.1.153:5173",
 	"https://intellirack.judesonleo.dev",
 	"https://intellirack.judesonleo.me",
 	"https://intellirack-full-eta.vercel.app/",
@@ -749,7 +756,7 @@ mongoose
 		app.set("mqttClient", mqttClient); // Store MQTT client for command handling
 		app.set("io", io); // Store io instance for event testing
 		const bindHost = process.env.BIND_HOST || "0.0.0.0";
-		server.listen(process.env.PORT, bindHost, () =>
+		server.listen(process.env.PORT,'0.0.0.0', bindHost, () =>
 			console.log(`🚀 Server running on http://${bindHost}:${process.env.PORT}`)
 		);
 	})
